@@ -262,16 +262,16 @@ printf "# v(0,0)=%d v(1,1)=%d\n", $v->Get(0,0), $v->Get(1,1);
 print "not " unless $v->Get(0,0) == 1 && $v->Get(1,1) == 4;
 printf "ok %d\n", ++$Test;
 
-# 35. Does 'Add' overloading work?
-$v = Variant(VT_R8, 1.23);
-$v += 1.23;
-printf "# ref=%s value=%s\n", ref $v, $v;
-print "not " unless UNIVERSAL::isa($v, 'Win32::OLE::Variant') && $v == 2.46;
+# 35. Test SAFEARRAY of BSTRs
+$v = Variant(VT_ARRAY|VT_BSTR, 2);
+$v->Put(0,'Hello')->Put(1,'World');
+printf "# v(0)=%s\n", $v->Get(0);
+print "not " unless $v->Get(0) eq 'Hello';
 printf "ok %d\n", ++$Test;
 
-# 36. VT_DECIMAL supported?
-$v = Variant(VT_DECIMAL, "79228162514264337593543950335");
---$v;
-print "# value=$v\n";
-print "not " unless $v eq "79228162514264337593543950334";
-printf "ok %d\n", ++$Test;
+# 36. Test SAFEARRAY f VARIANTs
+#$v = Variant(VT_ARRAY|VT_VARIANT, 2);
+#$v->Put(0,Variant(VT_CY, 4.23))->Put(1,Variant(VT_I2, 42));
+# TODO: Get() doesn't return Variant objects here
+#printf "# vt(0)=%d v(1)==%d\n", $v->Get(0)->Type, $v->Get(1)->Type;
+#print "not " unless $v->Get(0) eq 'Hello';

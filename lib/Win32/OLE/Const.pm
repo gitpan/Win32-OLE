@@ -16,7 +16,7 @@ sub import {
 
 sub EnumTypeLibs {
     my ($self,$callback) = @_;
-    &$callback(@$_) foreach @$Typelibs;
+    foreach (@$Typelibs) { &$callback(@$_) }
     return;
 }
 
@@ -67,7 +67,7 @@ sub LoadRegTypeLib {
 	# Prefer default language for equal version numbers
 	$res = -1 if $res == 0 && $a->[3] == 0;
 	$res =  1 if $res == 0 && $b->[3] == 0;
-	return $res;
+	$res;
     } @found;
 
     #printf "Loading %s\n", join(' ', @{$found[0]});
