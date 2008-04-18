@@ -43,15 +43,45 @@
 #   define DEBUGBREAK
 #endif
 
+// MingW is missing these 2 macros
+#ifndef V_RECORD
+#   ifdef NONAMELESSUNION
+#       define V_RECORDINFO(X) ((X)->__VARIANT_NAME_1.__VARIANT_NAME_2.__VARIANT_NAME_3.__VARIANT_NAME_4.pRecInfo)
+#       define V_RECORD(X)     ((X)->__VARIANT_NAME_1.__VARIANT_NAME_2.__VARIANT_NAME_3.__VARIANT_NAME_4.pvRecord)
+#   else
+#       define V_RECORDINFO(X) ((X)->pRecInfo)
+#       define V_RECORD(X)     ((X)->pvRecord)
+#   endif
+#endif
+
 extern "C" {
+#ifndef GUIDKIND_DEFAULT_SOURCE_DISP_IID
+#   define GUIDKIND_DEFAULT_SOURCE_DISP_IID 1
+#endif
 
 #ifdef __CYGWIN__
 #   undef WIN32			/* don't use with Cygwin & Perl */
 #   include <netdb.h>
 #   include <sys/socket.h>
 #   include <unistd.h>
-#   define strrev _strrev
-    char *_strrev(char*);	/* from string.h (msvcrt40) */
+
+#   ifndef strrev
+#     define strrev my_strrev
+
+static char *
+my_strrev(char *str)
+{
+    char *left = str;
+    char *right = left + strlen(left) - 1;
+    while (left < right) {
+        char temp = *left;
+        *left++ = *right;
+        *right-- = temp;
+    }
+    return str;
+}
+
+#   endif /* strrev */
 #endif
 
 #define PERL_NO_GET_CONTEXT
@@ -77,7 +107,13 @@ typedef unsigned short WORD;
 #endif
 
 #if PERL_VERSION > 6
-#   define utf8_to_uv utf8n_to_uvuni
+#   define my_utf8_to_uv(s) utf8_to_uvuni(s, NULL)
+#else
+#   if PERL_SUBVERSION > 0
+#      define my_utf8_to_uv(s) utf8_to_uv_simple(s, NULL)
+#   else
+#      define my_utf8_to_uv(s) utf8_to_uv(s, NULL)
+#   endif
 #endif
 
 #ifndef _DEBUG
@@ -110,6 +146,7 @@ static const LCID lcidSystemDefault = 2 << 10;
 /* static const LCID lcidDefault = 0; language neutral */
 static const LCID lcidDefault = lcidSystemDefault;
 static const UINT cpDefault = CP_ACP;
+static const BOOL varDefault = FALSE;
 static char PERL_OLE_ID[] = "___Perl___OleObject___";
 static const int PERL_OLE_IDLEN = sizeof(PERL_OLE_ID)-1;
 
@@ -129,6 +166,8 @@ static char LCID_NAME[] = "LCID";
 static const int LCID_LEN = sizeof(LCID_NAME)-1;
 static char CP_NAME[] = "CP";
 static const int CP_LEN = sizeof(CP_NAME)-1;
+static char VAR_NAME[] = "Variant";
+static const int VAR_LEN = sizeof(VAR_NAME)-1;
 static char WARN_NAME[] = "Warn";
 static const int WARN_LEN = sizeof(WARN_NAME)-1;
 static char _NEWENUM_NAME[] = "_NewEnum";
@@ -179,7 +218,7 @@ typedef struct
                                 sizeof(MY_VERSION)-1, FALSE);          \
         if (!pinterp || !*pinterp || !SvIOK(*pinterp))		       \
             warn(MY_VERSION ": Per-interpreter data not initialized"); \
-        PERINTERP *pInterp = (PERINTERP*)SvIV(*pinterp)
+        PERINTERP *pInterp = INT2PTR(PERINTERP*, SvIV(*pinterp))
 #    define INTERP pInterp
 #else
 static PERINTERP Interp;
@@ -401,10 +440,9 @@ MagicGet(pTHX_ SV *sv)
 BOOL
 StartsWithAlpha(pTHX_ SV *sv)
 {
-    STRLEN len;
-    char *str = SvPV(sv, len);
+    char *str = SvPV_nolen(sv);
     if (SvUTF8(sv))
-        return isALPHA_uni(utf8_to_uv((U8*)str, len, NULL, 0));
+        return isALPHA_uni(my_utf8_to_uv((U8*)str));
     else
         return isALPHA(*str);
 }
@@ -437,18 +475,10 @@ IsLocalMachine(pTHX_ SV *host)
 	return TRUE;
 
     /* Check against local computer name (from registry) */
-    if (USING_WIDE()) {
-	WCHAR wComputerName[MAX_COMPUTERNAME_LENGTH+1];
-	WCHAR wHostName[MAX_COMPUTERNAME_LENGTH+1];
-	A2WHELPER(pszName, wHostName, sizeof(wHostName));
-	if (GetComputerNameW(wComputerName, &dwSize)
-	    && _wcsicmp(wHostName, wComputerName) == 0)
-	    return TRUE;
-    }
-    else {
-	if (GetComputerNameA(szComputerName, &dwSize)
-	    && stricmp(pszName, szComputerName) == 0)
-	    return TRUE;
+    if (GetComputerNameA(szComputerName, &dwSize)
+        && stricmp(pszName, szComputerName) == 0)
+    {
+        return TRUE;
     }
 
     /* gethostname(), gethostbyname() and inet_addr() all call proxy functions
@@ -521,18 +551,9 @@ CLSIDFromRemoteRegistry(pTHX_ SV *host, SV *progid, CLSID *pCLSID)
     HKEY hKeyLocalMachine;
     HKEY hKeyProgID;
     LONG err;
-    WCHAR wbuffer[MAX_PATH+1];
     HRESULT hr = S_OK;
 
-    if (USING_WIDE()) {
-        // XXX Using SvPV_nolen(host) is not really right,
-        // XXX but USING_WIDE() is already pretty dodgy to start with.
-	A2WHELPER(SvPV_nolen(host), wbuffer, sizeof(wbuffer));
-	err = RegConnectRegistryW(wbuffer, HKEY_LOCAL_MACHINE, &hKeyLocalMachine);
-    }
-    else {
-	err = RegConnectRegistryA(SvPV_nolen(host), HKEY_LOCAL_MACHINE, &hKeyLocalMachine);
-    }
+    err = RegConnectRegistryA(SvPV_nolen(host), HKEY_LOCAL_MACHINE, &hKeyLocalMachine);
     if (err != ERROR_SUCCESS)
 	return HRESULT_FROM_WIN32(err);
 
@@ -540,15 +561,8 @@ CLSIDFromRemoteRegistry(pTHX_ SV *host, SV *progid, CLSID *pCLSID)
     sv_catsv(subkey, progid);
     sv_catpv(subkey, "\\CLSID");
 
-    if (USING_WIDE()) {
-	A2WHELPER(SvPV_nolen(subkey), wbuffer, sizeof(wbuffer));
-	err = RegOpenKeyExW(hKeyLocalMachine, wbuffer, 0, KEY_READ,
-			   &hKeyProgID);
-    }
-    else {
-	err = RegOpenKeyExA(hKeyLocalMachine, SvPV_nolen(subkey), 0, KEY_READ,
-			   &hKeyProgID);
-    }
+    err = RegOpenKeyExA(hKeyLocalMachine, SvPV_nolen(subkey), 0, KEY_READ,
+                        &hKeyProgID);
     if (err != ERROR_SUCCESS)
 	hr = HRESULT_FROM_WIN32(err);
     else {
@@ -693,7 +707,7 @@ GetWideChar(pTHX_ SV *sv, OLECHAR *wide, int len, UINT cp)
 	    *wide = (OLECHAR) 0;
 	    return wide;
 	}
-	count = MultiByteToWideChar(cp, 0, str, strlen, wide, len);
+	count = MultiByteToWideChar(cp, 0, str, (int)strlen, wide, len);
 	if (count > 0)
 	    return wide;
     }
@@ -702,7 +716,7 @@ GetWideChar(pTHX_ SV *sv, OLECHAR *wide, int len, UINT cp)
 	return wide;
     }
 
-    count = MultiByteToWideChar(cp, 0, str, strlen, NULL, 0);
+    count = MultiByteToWideChar(cp, 0, str, (int)strlen, NULL, 0);
     if (count == 0) {
 	warn(MY_VERSION ": GetWideChar() failure: %lu", GetLastError());
 	DEBUGBREAK;
@@ -713,7 +727,7 @@ GetWideChar(pTHX_ SV *sv, OLECHAR *wide, int len, UINT cp)
     }
 
     Newz(0, wide, count, OLECHAR);
-    MultiByteToWideChar(cp, 0, str, strlen, wide, count);
+    MultiByteToWideChar(cp, 0, str, (int)strlen, wide, count);
     return wide;
 
 }   /* GetWideChar */
@@ -761,7 +775,7 @@ IV
 QueryPkgVar(pTHX_ HV *stash, char *var, STRLEN len, IV def=0)
 {
     SV *sv;
-    GV **gv = (GV**)hv_fetch(stash, var, len, FALSE);
+    GV **gv = (GV**)hv_fetch(stash, var, (I32)len, FALSE);
 
     if (gv && (sv = GvSV(*gv)) != NULL && SvIOK(sv)) {
 	DBG(("QueryPkgVar(%s::%s) returns %d\n", HvNAME(stash), var, SvIV(sv)));
@@ -819,7 +833,7 @@ ReportOleError(pTHX_ HV *stash, HRESULT hr, EXCEPINFO *pExcep=NULL,
 	char *pszSource = szSource;
 	char *pszDesc = szDesc;
 
-	UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+	UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 	if (pExcep->bstrSource)
 	    pszSource = GetMultiByte(aTHX_ pExcep->bstrSource,
 				     szSource, sizeof(szSource), cp);
@@ -845,29 +859,11 @@ ReportOleError(pTHX_ HV *stash, HRESULT hr, EXCEPINFO *pExcep=NULL,
     /* try to append ': "error text"' from message catalog */
     char *pszMsgText;
     DWORD dwCount;
-    if (USING_WIDE()) {
-	WCHAR *wzMsgText;
-	dwCount = FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-				  FORMAT_MESSAGE_FROM_SYSTEM |
-				  FORMAT_MESSAGE_IGNORE_INSERTS,
-				  NULL, hr, lcidSystemDefault,
-				  (LPWSTR)&wzMsgText, 0, NULL);
-	pszMsgText = (LPSTR)LocalAlloc(0, (dwCount+1)*2);
-	if (pszMsgText) {
-	    W2AHELPER(wzMsgText, pszMsgText, (dwCount+1)*2);
-	    dwCount = strlen(pszMsgText);
-	}
-	else
-	    dwCount = 0;
-	LocalFree(wzMsgText);
-    }
-    else {
-	dwCount = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER |
-				  FORMAT_MESSAGE_FROM_SYSTEM |
-				  FORMAT_MESSAGE_IGNORE_INSERTS,
-				  NULL, hr, lcidSystemDefault,
-				  (LPSTR)&pszMsgText, 0, NULL);
-    }
+    dwCount = FormatMessageA(FORMAT_MESSAGE_ALLOCATE_BUFFER |
+                             FORMAT_MESSAGE_FROM_SYSTEM |
+                             FORMAT_MESSAGE_IGNORE_INSERTS,
+                             NULL, hr, lcidSystemDefault,
+                             (LPSTR)&pszMsgText, 0, NULL);
     if (dwCount > 0) {
 	sv_catpv(sv, ": \"");
 	/* remove trailing dots and CRs/LFs from message */
@@ -910,7 +906,7 @@ ReportOleError(pTHX_ HV *stash, HRESULT hr, EXCEPINFO *pExcep=NULL,
 
 	if (cch > 76 && pLastBlank) {
 	    *pLastBlank = '\n';
-	    cch = pch - pLastBlank;
+	    cch = (int)(pch - pLastBlank);
 	}
     }
 
@@ -1046,7 +1042,7 @@ CreatePerlObject(pTHX_ HV *stash, IDispatch *pDispatch, SV *destroy)
         DBG(("hv_fetch(%08x) returned %08x", punk, svp));
         punk->Release();
         if (svp)
-            return sv_2mortal(sv_bless(newRV((SV*)SvIV(*svp)), stash));
+            return sv_2mortal(sv_bless(newRV(INT2PTR(SV*, SvIV(*svp))), stash));
     }
 
     if (!pDispatch) {
@@ -1087,7 +1083,7 @@ CreatePerlObject(pTHX_ HV *stash, IDispatch *pDispatch, SV *destroy)
         pDispatch->QueryInterface(IID_IUnknown, (void**)&punk);
         /* use XIV as a weak reference */
         SV **svp = hv_store(g_hv_unique, (char*)&punk, sizeof(punk),
-                            newSViv((IV)pObj->self), 0);
+                            newSViv(PTR2IV(pObj->self)), 0);
         DBG(("hv_store(%08x) returned %08x", punk, svp));
         punk->Release();
         pObj->flags |= OBJFLAG_UNIQUE;
@@ -1098,7 +1094,7 @@ CreatePerlObject(pTHX_ HV *stash, IDispatch *pDispatch, SV *destroy)
     DBG(("CreatePerlObject=|%lx| Class=%s Tie=%s pDispatch=0x%x\n", pObj,
 	 HvNAME(stash), szTie, pDispatch));
 
-    hv_store(hvinner, PERL_OLE_ID, PERL_OLE_IDLEN, newSViv((IV)pObj), 0);
+    hv_store(hvinner, PERL_OLE_ID, PERL_OLE_IDLEN, newSViv(PTR2IV(pObj)), 0);
     inner = sv_bless(newRV_noinc((SV*)hvinner), gv_stashpv(szTie, TRUE));
     sv_magic((SV*)pObj->self, inner, 'P', Nullch, 0);
     SvREFCNT_dec(inner);
@@ -1220,7 +1216,7 @@ GetOleObject(pTHX_ SV *sv, BOOL bDESTROY=FALSE)
 	    MagicGet(aTHX_ *psv);
 
 	if (psv && SvIOK(*psv)) {
-	    WINOLEOBJECT *pObj = (WINOLEOBJECT*)SvIV(*psv);
+	    WINOLEOBJECT *pObj = INT2PTR(WINOLEOBJECT*, SvIV(*psv));
 
 	    DBG(("GetOleObject = |%lx|\n", pObj));
 	    if (pObj && pObj->header.lMagic == WINOLE_MAGIC)
@@ -1237,7 +1233,7 @@ WINOLEENUMOBJECT *
 GetOleEnumObject(pTHX_ SV *sv, BOOL bDESTROY=FALSE)
 {
     if (sv_isobject(sv) && sv_derived_from(sv, szWINOLEENUM)) {
-	WINOLEENUMOBJECT *pEnumObj = (WINOLEENUMOBJECT*)SvIV(SvRV(sv));
+	WINOLEENUMOBJECT *pEnumObj = INT2PTR(WINOLEENUMOBJECT*, SvIV(SvRV(sv)));
 
 	if (pEnumObj && pEnumObj->header.lMagic == WINOLEENUM_MAGIC)
 	    if (pEnumObj->pEnum || bDESTROY)
@@ -1252,7 +1248,7 @@ WINOLEVARIANTOBJECT *
 GetOleVariantObject(pTHX_ SV *sv, BOOL bWarn=TRUE)
 {
     if (sv_isobject(sv) && sv_derived_from(sv, szWINOLEVARIANT)) {
-	WINOLEVARIANTOBJECT *pVarObj = (WINOLEVARIANTOBJECT*)SvIV(SvRV(sv));
+	WINOLEVARIANTOBJECT *pVarObj = INT2PTR(WINOLEVARIANTOBJECT*, SvIV(SvRV(sv)));
 
 	if (pVarObj && pVarObj->header.lMagic == WINOLEVARIANT_MAGIC)
 	    return pVarObj;
@@ -1276,7 +1272,7 @@ CreateTypeLibObject(pTHX_ ITypeLib *pTypeLib, TLIBATTR *pTLibAttr)
 
     AddToObjectChain(aTHX_ (OBJECTHEADER*)pObj, WINOLETYPELIB_MAGIC);
 
-    return sv_bless(newRV_noinc(newSViv((IV)pObj)),
+    return sv_bless(newRV_noinc(newSViv(PTR2IV(pObj))),
 		    gv_stashpv(szWINOLETYPELIB, TRUE));
 }
 
@@ -1284,7 +1280,7 @@ WINOLETYPELIBOBJECT *
 GetOleTypeLibObject(pTHX_ SV *sv)
 {
     if (sv_isobject(sv) && sv_derived_from(sv, szWINOLETYPELIB)) {
-	WINOLETYPELIBOBJECT *pObj = (WINOLETYPELIBOBJECT*)SvIV(SvRV(sv));
+	WINOLETYPELIBOBJECT *pObj = INT2PTR(WINOLETYPELIBOBJECT*, SvIV(SvRV(sv)));
 
 	if (pObj && pObj->header.lMagic == WINOLETYPELIB_MAGIC)
 	    return pObj;
@@ -1305,7 +1301,7 @@ CreateTypeInfoObject(pTHX_ ITypeInfo *pTypeInfo, TYPEATTR *pTypeAttr)
 
     AddToObjectChain(aTHX_ (OBJECTHEADER*)pObj, WINOLETYPEINFO_MAGIC);
 
-    return sv_bless(newRV_noinc(newSViv((IV)pObj)),
+    return sv_bless(newRV_noinc(newSViv(PTR2IV(pObj))),
 		    gv_stashpv(szWINOLETYPEINFO, TRUE));
 }
 
@@ -1313,7 +1309,7 @@ WINOLETYPEINFOOBJECT *
 GetOleTypeInfoObject(pTHX_ SV *sv)
 {
     if (sv_isobject(sv) && sv_derived_from(sv, szWINOLETYPEINFO)) {
-	WINOLETYPEINFOOBJECT *pObj = (WINOLETYPEINFOOBJECT*)SvIV(SvRV(sv));
+	WINOLETYPEINFOOBJECT *pObj = INT2PTR(WINOLETYPEINFOOBJECT*, SvIV(SvRV(sv)));
 
 	if (pObj && pObj->header.lMagic == WINOLETYPEINFO_MAGIC)
 	    return pObj;
@@ -1341,7 +1337,7 @@ AllocOleStringFromSV(pTHX_ SV *sv, UINT cp)
     if (SvROK(sv) && sv_derived_from(sv, szUNICODESTRING)) {
         sv = SvRV(sv);
         U16 *pus = (U16*)SvPV(sv, len);
-        BSTR bstr = SysAllocStringLen(NULL, len/2);
+        BSTR bstr = SysAllocStringLen(NULL, (UINT)(len/2));
         for (STRLEN i=0; i < len; ++i)
             bstr[i] = ntohs(pus[i]);
         return bstr;
@@ -1351,9 +1347,9 @@ AllocOleStringFromSV(pTHX_ SV *sv, UINT cp)
         cp = CP_ACP;
 
     char *str = SvPV(sv, len);
-    int count = MultiByteToWideChar(cp, 0, str, len, NULL, 0);
+    int count = MultiByteToWideChar(cp, 0, str, (int)len, NULL, 0);
     BSTR bstr = SysAllocStringLen(NULL, count);
-    MultiByteToWideChar(cp, 0, str, len, bstr, count);
+    MultiByteToWideChar(cp, 0, str, (int)len, bstr, count);
     return bstr;
 }
 
@@ -1414,7 +1410,7 @@ FetchTypeInfo(pTHX_ WINOLEOBJECT *pObj)
 	return;
     }
 
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
     hr = pObj->pDispatch->GetTypeInfo(0, lcid, &pTypeInfo);
     if (CheckOleError(aTHX_ stash, hr))
 	return;
@@ -1490,11 +1486,11 @@ NextPropertyName(pTHX_ WINOLEOBJECT *pObj)
     BSTR bstr;
 
     if (!pObj->pTypeInfo)
-	return &PL_sv_undef;
+	return NULL;
 
     HV *stash = SvSTASH(pObj->self);
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
-    int newenum = QueryPkgVar(aTHX_ stash, _NEWENUM_NAME, _NEWENUM_LEN);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    int newenum = (int)QueryPkgVar(aTHX_ stash, _NEWENUM_NAME, _NEWENUM_LEN);
 
     while (pObj->PropIndex < (UINT)(pObj->cFuncs+pObj->cVars)) {
 	ULONG index = pObj->PropIndex++;
@@ -1556,7 +1552,7 @@ NextPropertyName(pTHX_ WINOLEOBJECT *pObj)
 	    return sv;
 	}
     }
-    return &PL_sv_undef;
+    return NULL;
 
 }   /* NextPropertyName */
 
@@ -1843,7 +1839,7 @@ FindDefaultSource(pTHX_ WINOLEOBJECT *pObj, IID *piid,
 	if ((iFlags & IMPLTYPEFLAG_FDEFAULT) &&
 	    (iFlags & IMPLTYPEFLAG_FSOURCE))
 	{
-	    HREFTYPE hRefType = NULL;
+	    HREFTYPE hRefType = 0;
 
 	    hr = pTypeInfo->GetRefTypeOfImplType(i, &hRefType);
 	    DBG(("GetRefTypeOfImplType: hr=0x%08x\n", hr));
@@ -1896,7 +1892,7 @@ CreateEnumVARIANT(pTHX_ WINOLEOBJECT *pObj)
     dispParams.cArgs = 0;
 
     HV *stash = SvSTASH(pObj->self);
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
 
     Zero(&excepinfo, 1, EXCEPINFO);
     hr = pObj->pDispatch->Invoke(DISPID_NEWENUM, IID_NULL,
@@ -1919,20 +1915,19 @@ CreateEnumVARIANT(pTHX_ WINOLEOBJECT *pObj)
 SV *
 NextEnumElement(pTHX_ IEnumVARIANT *pEnum, HV *stash)
 {
-    HRESULT hr = S_OK;
-    SV *sv = &PL_sv_undef;
+    SV *sv = NULL;
     VARIANT variant;
 
     VariantInit(&variant);
-    if (SUCCEEDED(pEnum->Next(1, &variant, NULL))) {
+    if (pEnum->Next(1, &variant, NULL) == S_OK) {
 	sv = newSV(0);
-	hr = SetSVFromVariantEx(aTHX_ &variant, sv, stash);
-    }
-    VariantClear(&variant);
-    if (FAILED(hr)) {
-        SvREFCNT_dec(sv);
-	sv = &PL_sv_undef;
-	ReportOleError(aTHX_ stash, hr);
+	HRESULT hr = SetSVFromVariantEx(aTHX_ &variant, sv, stash);
+        if (FAILED(hr)) {
+            SvREFCNT_dec(sv);
+            sv = NULL;
+            ReportOleError(aTHX_ stash, hr);
+        }
+        VariantClear(&variant);
     }
     return sv;
 
@@ -2128,7 +2123,7 @@ EventSink::Invoke(
     else if (SvPOK(m_events)) {
 	HV *stash = gv_stashsv(m_events, FALSE);
 	if (stash) {
-	    GV **pgv = (GV**)hv_fetch(stash, SvPVX(event), SvCUR(event), FALSE);
+	    GV **pgv = (GV**)hv_fetch(stash, SvPVX(event), (I32)SvCUR(event), FALSE);
 	    if (pgv && GvCV(*pgv))
 		callback = (SV*)GvCV(*pgv);
 	}
@@ -2304,6 +2299,35 @@ MyVariantCopy(VARIANTARG *dest, VARIANTARG *src)
     }
 
     return VariantCopy(dest, src);
+}
+
+void
+ClearVariantObject(WINOLEVARIANTOBJECT *pVarObj)
+{
+    if (!pVarObj)
+        return;
+
+    VARIANT *pVariant = &pVarObj->variant;
+    VARTYPE vt = V_VT(pVariant);
+
+    if (vt & VT_BYREF) {
+        switch (vt & ~VT_BYREF) {
+        case VT_BSTR:
+            SysFreeString(*V_BSTRREF(pVariant));
+            break;
+        case VT_DISPATCH:
+            if (*V_DISPATCHREF(pVariant))
+                (*V_DISPATCHREF(pVariant))->Release();
+            break;
+        case VT_UNKNOWN:
+            if (*V_UNKNOWNREF(pVariant))
+                (*V_UNKNOWNREF(pVariant))->Release();
+            break;
+        }
+        VariantInit(pVariant);
+    }
+    else
+        VariantClear(pVariant);
 }
 
 SV *
@@ -2524,9 +2548,9 @@ SetVariantFromSVEx(pTHX_ SV* sv, VARIANT *pVariant, UINT cp, LCID lcid)
 	}
 
 	/* Create and fill VARIANT array */
-	SAFEARRAY *psa = SafeArrayCreate(VT_VARIANT, dim, psab);
+	SAFEARRAY *psa = SafeArrayCreate(VT_VARIANT, (UINT)dim, psab);
 	if (psa)
-	    hr = SetSafeArrayFromAV(aTHX_ (AV*)sv, VT_VARIANT, psa, dim,
+	    hr = SetSafeArrayFromAV(aTHX_ (AV*)sv, VT_VARIANT, psa, (int)dim,
 				    cp, lcid);
 	else
 	    hr = E_OUTOFMEMORY;
@@ -2549,7 +2573,7 @@ SetVariantFromSVEx(pTHX_ SV* sv, VARIANT *pVariant, UINT cp, LCID lcid)
     /* Scalars */
     if (SvIOK(sv)) {
 	V_VT(pVariant) = VT_I4;
-	V_I4(pVariant) = SvIV(sv);
+	V_I4(pVariant) = (LONG)SvIV(sv);
     }
     else if (SvNOK(sv)) {
 	V_VT(pVariant) = VT_R8;
@@ -2585,9 +2609,9 @@ AssignVariantFromSV(pTHX_ SV* sv, VARIANT *pVariant, UINT cp, LCID lcid)
 
 #   define ASSIGN(vartype,perltype,ctype)                            \
         if (vt & VT_BYREF) {                                         \
-            *V_##vartype##REF(pVariant) = (ctype)Sv##perltype##(sv); \
+            *V_##vartype##REF(pVariant) = (ctype)Sv##perltype (sv);  \
         } else {                                                     \
-            V_##vartype(pVariant) = (ctype)Sv##perltype##(sv);       \
+            V_##vartype(pVariant) = (ctype)Sv##perltype (sv);        \
         }
 
     /* XXX requirement to call mg_get() may change in Perl > 5.005 */
@@ -2628,7 +2652,9 @@ AssignVariantFromSV(pTHX_ SV* sv, VARIANT *pVariant, UINT cp, LCID lcid)
 	return hr;
     }
 
-    switch (vt & VT_TYPEMASK) {
+    VARTYPE vt_base = vt & VT_TYPEMASK;
+
+    switch (vt_base) {
     case VT_EMPTY:
     case VT_NULL:
 	break;
@@ -2655,7 +2681,7 @@ AssignVariantFromSV(pTHX_ SV* sv, VARIANT *pVariant, UINT cp, LCID lcid)
 	VARIANT variant;
 	if (SvIOK(sv)) {
 	    V_VT(&variant) = VT_I4;
-	    V_I4(&variant) = SvIV(sv);
+	    V_I4(&variant) = (LONG)SvIV(sv);
 	}
 	else if (SvNOK(sv)) {
 	    V_VT(&variant) = VT_R8;
@@ -2666,7 +2692,6 @@ AssignVariantFromSV(pTHX_ SV* sv, VARIANT *pVariant, UINT cp, LCID lcid)
 	    V_BSTR(&variant) = AllocOleStringFromSV(aTHX_ sv, cp);
 	}
 
-	VARTYPE vt_base = vt & ~VT_BYREF;
 	hr = VariantChangeTypeEx(&variant, &variant, lcid, 0, vt_base);
 	if (SUCCEEDED(hr)) {
 	    if (vt_base == VT_CY) {
@@ -2823,9 +2848,9 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
 
 #   define SET(perltype,vartype)                                 \
         if (vt & VT_BYREF) {                                     \
-            sv_set##perltype##(sv, *V_##vartype##REF(pVariant)); \
+            sv_set##perltype (sv, *V_##vartype##REF(pVariant));  \
         } else {                                                 \
-            sv_set##perltype##(sv, V_##vartype##(pVariant));     \
+            sv_set##perltype (sv, V_##vartype (pVariant));       \
         }
 
     sv_setsv(sv, &PL_sv_undef);
@@ -2838,7 +2863,7 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
 	hr = VariantCopy(&pVarObj->variant, pVariant);
 	if (FAILED(hr)) {
 	    Safefree(pVarObj);
-	    ReportOleError(aTHX_ stash, hr);
+            return hr;
 	}
 
 	AddToObjectChain(aTHX_ (OBJECTHEADER*)pVarObj, WINOLEVARIANT_MAGIC);
@@ -2855,20 +2880,13 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
     }
 
     if (V_ISARRAY(pVariant)) {
+        VARTYPE vt_base = vt & VT_TYPEMASK;
 	SAFEARRAY *psa = V_ISBYREF(pVariant) ? *V_ARRAYREF(pVariant)
 	                                     : V_ARRAY(pVariant);
-	AV **pav;
-	IV index;
-	long *pArrayIndex, *pLowerBound, *pUpperBound;
-	VARIANT variant;
-
 	int dim = SafeArrayGetDim(psa);
 
-	VariantInit(&variant);
-	V_VT(&variant) = (vt & ~VT_ARRAY) | VT_BYREF;
-
 	/* convert 1-dim UI1 ARRAY to simple SvPV */
-	if (dim == 1 && (vt & VT_TYPEMASK) == VT_UI1) {
+	if (vt_base == VT_UI1 && dim == 1) {
 	    char *pStr;
 	    long lLower, lUpper;
 
@@ -2883,45 +2901,64 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
 	    return hr;
 	}
 
+	AV **pav;
+	long *pArrayIndex, *pLowerBound, *pUpperBound;
+
+	New(0, pav,         dim, AV*);
 	New(0, pArrayIndex, dim, long);
 	New(0, pLowerBound, dim, long);
 	New(0, pUpperBound, dim, long);
-	New(0, pav,         dim, AV*);
 
+	IV index;
 	for (index = 0; index < dim; ++index) {
 	    pav[index] = newAV();
-	    SafeArrayGetLBound(psa, index+1, &pLowerBound[index]);
-	    SafeArrayGetUBound(psa, index+1, &pUpperBound[index]);
+	    SafeArrayGetLBound(psa, (UINT)(index+1), &pLowerBound[index]);
+	    SafeArrayGetUBound(psa, (UINT)(index+1), &pUpperBound[index]);
 	}
 
 	Copy(pLowerBound, pArrayIndex, dim, long);
 
 	hr = SafeArrayLock(psa);
 	if (SUCCEEDED(hr)) {
-	    while (index >= 0) {
-		hr = SafeArrayPtrOfIndex(psa, pArrayIndex, &V_BYREF(&variant));
-		if (FAILED(hr))
-		    break;
+            VARIANT variant;
+            VariantInit(&variant);
+            if (vt_base == VT_RECORD) {
+                hr = SafeArrayGetRecordInfo(psa, &V_RECORDINFO(&variant));
+                if (SUCCEEDED(hr))
+                    V_VT(&variant) = VT_RECORD;
+            }
+            else
+                V_VT(&variant) = vt_base | VT_BYREF;
 
-		SV *val = newSV(0);
-		hr = SetSVFromVariantEx(aTHX_ &variant, val, stash);
-		if (FAILED(hr)) {
-		    SvREFCNT_dec(val);
-		    break;
-		}
-		av_push(pav[dim-1], val);
+            if (SUCCEEDED(hr)) {
+                while (index >= 0) {
+                    if (vt_base == VT_RECORD)
+                        hr = SafeArrayPtrOfIndex(psa, pArrayIndex, &V_RECORD(&variant));
+                    else
+                        hr = SafeArrayPtrOfIndex(psa, pArrayIndex, &V_BYREF(&variant));
+                    if (FAILED(hr))
+                        break;
 
-		for (index = dim-1; index >= 0; --index) {
-		    if (++pArrayIndex[index] <= pUpperBound[index])
-			break;
+                    SV *val = newSV(0);
+                    hr = SetSVFromVariantEx(aTHX_ &variant, val, stash);
+                    if (FAILED(hr)) {
+                        SvREFCNT_dec(val);
+                        break;
+                    }
+                    av_push(pav[dim-1], val);
 
-		    pArrayIndex[index] = pLowerBound[index];
-		    if (index > 0) {
-			av_push(pav[index-1], newRV_noinc((SV*)pav[index]));
-			pav[index] = newAV();
-		    }
-		}
-	    }
+                    for (index = dim-1; index >= 0; --index) {
+                        if (++pArrayIndex[index] <= pUpperBound[index])
+                            break;
+
+                        pArrayIndex[index] = pLowerBound[index];
+                        if (index > 0) {
+                            av_push(pav[index-1], newRV_noinc((SV*)pav[index]));
+                            pav[index] = newAV();
+                        }
+                    }
+                }
+            }
 
 	    /* preserve previous error code */
 	    HRESULT hr2 = SafeArrayUnlock(psa);
@@ -2974,7 +3011,7 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
 
     case VT_BSTR:
     {
-	UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+	UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
 	if (V_ISBYREF(pVariant))
 	    sv_setbstr(aTHX_ sv, *V_BSTRREF(pVariant), cp);
@@ -2986,6 +3023,7 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
     case VT_ERROR:
     case VT_DATE:
     {
+ ConvertToVariant:
 	SV *classname;
 	WINOLEVARIANTOBJECT *pVarObj;
 	Newz(0, pVarObj, 1, WINOLEVARIANTOBJECT);
@@ -2994,7 +3032,6 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
 	hr = VariantCopy(&pVarObj->variant, pVariant);
 	if (FAILED(hr)) {
 	    Safefree(pVarObj);
-	    ReportOleError(aTHX_ stash, hr, NULL, NULL);
             break;
 	}
 
@@ -3049,6 +3086,10 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
 
     case VT_DECIMAL:
     {
+	BOOL var = (BOOL)QueryPkgVar(aTHX_ stash, VAR_NAME, VAR_LEN, varDefault);
+        if (var)
+            goto ConvertToVariant;
+
 	VARIANT variant;
 	VariantInit(&variant);
 	hr = VariantChangeTypeEx(&variant, pVariant, lcidDefault, 0, VT_R8);
@@ -3058,11 +3099,67 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
 	break;
     }
 
+    case VT_RECORD:
+    {
+	UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+        IRecordInfo *pinfo = V_RECORDINFO(pVariant);
+        void *pRecord = V_RECORD(pVariant);
+
+        ULONG count = 0;
+        hr = pinfo->GetFieldNames(&count, NULL);
+	if (FAILED(hr) || count == 0)
+            break;
+
+        BSTR *names;
+        Newz(0, names, count, BSTR);
+        hr = pinfo->GetFieldNames(&count, names);
+	if (FAILED(hr)) {
+            Safefree(names);
+            break;
+        }
+
+        HV *hv = newHV();
+        ULONG i;
+        for (i=0; i<count; ++i) {
+            VARIANT variant;
+            void *pData = NULL;
+            VariantInit(&variant);
+            hr = pinfo->GetFieldNoCopy(pRecord, names[i], &variant, &pData);
+            if (FAILED(hr))
+                break;
+
+            SV *value = newSV(0);
+            hr = SetSVFromVariantEx(aTHX_ &variant, value, stash, FALSE);
+            if (FAILED(hr)) {
+                SvREFCNT_dec(value);
+                break;
+            }
+	    SV *name = sv_setbstr(aTHX_ NULL, names[i], cp);
+            hv_store_ent(hv, name, value, 0);
+            SvREFCNT_dec(name);
+        }
+
+        for (i=0; i<count; ++i)
+            SysFreeString(names[i]);
+        Safefree(names);
+
+	if (SUCCEEDED(hr))
+	    sv_setsv(sv, sv_2mortal(newRV_noinc((SV*)hv)));
+	else
+	    SvREFCNT_dec((SV*)hv);
+
+        break;
+    }
+
     case VT_CY:
     default:
     {
-	LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
-	UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+	BOOL var = (BOOL)QueryPkgVar(aTHX_ stash, VAR_NAME, VAR_LEN, varDefault);
+        if (var)
+            goto ConvertToVariant;
+
+	LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+	UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 	VARIANT variant;
 
 	VariantInit(&variant);
@@ -3088,59 +3185,26 @@ IV
 GetLocaleNumber(pTHX_ HV *hv, char *key, LCID lcid, LCTYPE lctype)
 {
     if (hv) {
-	SV **psv = hv_fetch(hv, key, strlen(key), FALSE);
+	SV **psv = hv_fetch(hv, key, (I32)strlen(key), FALSE);
 	if (psv)
 	    return SvIV(*psv);
     }
 
     IV number;
-    if (USING_WIDE()) {
-	WCHAR *info;
-	int len = GetLocaleInfoW(lcid, lctype, NULL, 0);
-	New(0, info, len, WCHAR);
-	GetLocaleInfoW(lcid, lctype, info, len);
-	number = _wtol(info);
-	Safefree(info);
-    }
-    else {
-	char *info;
-	int len = GetLocaleInfoA(lcid, lctype, NULL, 0);
-	New(0, info, len, char);
-	GetLocaleInfoA(lcid, lctype, info, len);
-	number = atol(info);
-	Safefree(info);
-    }
+    char *info;
+    int len = GetLocaleInfoA(lcid, lctype, NULL, 0);
+    New(0, info, len, char);
+    GetLocaleInfoA(lcid, lctype, info, len);
+    number = atol(info);
+    Safefree(info);
     return number;
-}
-
-WCHAR *
-GetLocaleStringW(pTHX_ HV *hv, char *key, LCID lcid, LCTYPE lctype)
-{
-    STRLEN len;
-    SV *sv;
-    if (hv) {
-	SV **psv = hv_fetch(hv, key, strlen(key), FALSE);
-	if (psv) {
-	    char* ptr = SvPV(*psv, len);
-	    ++len;
-	    sv = sv_2mortal(newSV(len*sizeof(WCHAR)));
-	    WCHAR* wptr = (WCHAR*)SvPVX(sv);
-	    A2WHELPER(ptr, wptr, len*sizeof(WCHAR));
-	    return wptr;
-	}
-    }
-
-    len = GetLocaleInfoW(lcid, lctype, NULL, 0);
-    sv = sv_2mortal(newSV(len*sizeof(WCHAR)));
-    GetLocaleInfoW(lcid, lctype, (WCHAR*)SvPVX(sv), len);
-    return (WCHAR*)SvPVX(sv);
 }
 
 char *
 GetLocaleString(pTHX_ HV *hv, char *key, LCID lcid, LCTYPE lctype)
 {
     if (hv) {
-	SV **psv = hv_fetch(hv, key, strlen(key), FALSE);
+	SV **psv = hv_fetch(hv, key, (I32)strlen(key), FALSE);
 	if (psv)
 	    return SvPV_nolen(*psv);
     }
@@ -3218,8 +3282,7 @@ Uninitialize(pTHX_ PERINTERP *pInterp)
 
 	    case WINOLEVARIANT_MAGIC: {
 		WINOLEVARIANTOBJECT *pVarObj = (WINOLEVARIANTOBJECT*)pHeader;
-		VariantClear(&pVarObj->byref);
-		VariantClear(&pVarObj->variant);
+                ClearVariantObject(pVarObj);
 		break;
 	    }
 
@@ -3286,7 +3349,7 @@ Bootstrap(pTHX)
     if (SvOK(sv))
 	warn(MY_VERSION ": Per-interpreter data already set");
 
-    sv_setiv(sv, (IV)pInterp);
+    sv_setiv(sv, PTR2IV(pInterp));
 #endif
 
     g_pObj = NULL;
@@ -3405,7 +3468,7 @@ PPCODE:
     case 0: {		// Initialize
 	DWORD dwCoInit = COINIT_MULTITHREADED;
 	if (items > 1 && SvOK(ST(1)))
-	    dwCoInit = SvIV(ST(1));
+	    dwCoInit = (DWORD)SvIV(ST(1));
 
 	Initialize(aTHX_ gv_stashsv(ST(0), TRUE), dwCoInit);
 	break;
@@ -3470,7 +3533,7 @@ PPCODE:
     HV *stash = gv_stashsv(self, TRUE);
     SV *progid = ST(1);
     SV *destroy = NULL;
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
     Initialize(aTHX_ stash);
     SetLastOleError(aTHX_ stash);
@@ -3491,7 +3554,21 @@ PPCODE:
 	if (SUCCEEDED(hr)) {
 	    hr = CoCreateInstance(clsid, NULL, CLSCTX_SERVER,
 				  IID_IDispatch, (void**)&pDispatch);
-	}
+            /* The tlbinf32.dll from Microsoft fails this call.
+             * It however supports instantiating an IUnknown interface
+             * and then querying that one for IDispatch...
+             */
+            if (hr == E_NOINTERFACE) {
+                IUnknown *punk;
+                hr = CoCreateInstance(clsid, NULL, CLSCTX_SERVER,
+                                      IID_IUnknown, (void**)&punk);
+                if (SUCCEEDED(hr)) {
+                    hr = punk->QueryInterface(IID_IDispatch, (void**)&pDispatch);
+                    punk->Release();
+                }
+            }
+        }
+
 	if (!CheckOleError(aTHX_ stash, hr)) {
 	    ST(0) = CreatePerlObject(aTHX_ stash, pDispatch, destroy);
 	    DBG(("Win32::OLE::new |%lx| |%lx|\n", ST(0), pDispatch));
@@ -3621,8 +3698,8 @@ PPCODE:
     HV *stash = SvSTASH(pObj->self);
     SetLastOleError(aTHX_ stash);
 
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
     /* allow [wFlags, 'Method'] instead of 'Method' */
     if (SvROK(method) && (sv = SvRV(method)) &&	SvTYPE(sv) == SVt_PVAV &&
@@ -3634,12 +3711,12 @@ PPCODE:
 
     if (SvIOK(method)) {
         /* XXX this will NOT work with named parameters */
-        dispID = SvIV(method);
+        dispID = (DISPID)SvIV(method);
     }
     else if (SvPOK(method)) {
 	buffer = SvPV(method, length);
 	if (length > 0) {
-            int newenum = QueryPkgVar(aTHX_ stash, _NEWENUM_NAME, _NEWENUM_LEN);
+            int newenum = (int)QueryPkgVar(aTHX_ stash, _NEWENUM_NAME, _NEWENUM_LEN);
             if (newenum && strEQ(buffer, "_NewEnum")) {
                 AV *av = newAV();
                 PUSHMARK(sp);
@@ -3688,7 +3765,7 @@ PPCODE:
 	DISPID  *rgdispids;
 	HV      *hv = (HV*)sv;
 
-	dispParams.cNamedArgs = HvKEYS(hv);
+	dispParams.cNamedArgs = (UINT)HvKEYS(hv);
 	dispParams.cArgs += dispParams.cNamedArgs - 1;
 
 	New(0, rghe, dispParams.cNamedArgs, HE*);
@@ -3700,7 +3777,7 @@ PPCODE:
 	New(0, rgszNames, 1+dispParams.cNamedArgs, OLECHAR*);
 	New(0, rgdispids, 1+dispParams.cNamedArgs, DISPID);
 
-	rgszNames[0] = AllocOleString(aTHX_ buffer, length, cp);
+	rgszNames[0] = AllocOleString(aTHX_ buffer, (int)length, cp);
 	hv_iterinit(hv);
 	for (index = 0; index < dispParams.cNamedArgs; ++index) {
 	    rghe[index] = hv_iternext(hv);
@@ -3800,17 +3877,19 @@ PPCODE:
 	if (sv_isobject(retval) && sv_derived_from(retval, szWINOLEVARIANT)) {
 	    WINOLEVARIANTOBJECT *pVarObj = GetOleVariantObject(aTHX_ retval);
 	    if (pVarObj) {
-		VariantClear(&pVarObj->byref);
+		ClearVariantObject(pVarObj);
 		MyVariantCopy(&pVarObj->variant, &result);
 		ST(0) = &PL_sv_yes;
 	    }
 	}
 	else {
 	    hr = SetSVFromVariantEx(aTHX_ &result, retval, stash);
-	    ST(0) = &PL_sv_yes;
+            if (SUCCEEDED(hr))
+                ST(0) = &PL_sv_yes;
 	}
     }
-    else {
+
+    if (FAILED(hr)) {
 	/* use more specific error code from exception when available */
 	if (hr == DISP_E_EXCEPTION && FAILED(excepinfo.scode))
 	    hr = excepinfo.scode;
@@ -3876,8 +3955,8 @@ PPCODE:
     HV *stash = SvSTASH(pObj->self);
     SetLastOleError(aTHX_ stash);
 
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
     HRESULT hr = GetHashedDispID(aTHX_ pObj, method, dispID, lcid, cp);
     if (FAILED(hr))
@@ -3983,7 +4062,7 @@ PPCODE:
     HV *stash = gv_stashsv(self, TRUE);
     SV *progid = ST(1);
     SV *destroy = NULL;
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
     Initialize(aTHX_ stash);
     SetLastOleError(aTHX_ stash);
@@ -4040,7 +4119,7 @@ PPCODE:
     HV *stash = gv_stashsv(self, TRUE);
     SV *pathname = ST(1);
     SV *destroy = NULL;
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
     Initialize(aTHX_ stash);
     SetLastOleError(aTHX_ stash);
@@ -4087,7 +4166,7 @@ PPCODE:
     TYPEATTR  *pTypeAttr;
 
     HV *stash = gv_stashsv(self, TRUE);
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
 
     SetLastOleError(aTHX_ stash);
     HRESULT hr = pObj->pDispatch->GetTypeInfo(0, lcid, &pTypeInfo);
@@ -4122,8 +4201,8 @@ PPCODE:
 
     DBG(("QueryInterface(%s)\n", pszItf));
     HV *stash = SvSTASH(pObj->self);
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
     SetLastOleError(aTHX_ stash);
 
@@ -4182,8 +4261,8 @@ PPCODE:
 	XSRETURN_EMPTY;
 
     HV *stash = gv_stashsv(ST(0), TRUE);
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
     SetLastOleError(aTHX_ stash);
     hr = pObj->pDispatch->GetTypeInfo(0, lcid, &pTypeInfo);
@@ -4254,8 +4333,8 @@ PPCODE:
 	XSRETURN_EMPTY;
     CoUninitialize();
 
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
     SetLastOleError(aTHX_ stash);
 
     IID iid;
@@ -4288,7 +4367,7 @@ PPCODE:
 		    if ((iFlags & IMPLTYPEFLAG_FDEFAULT) &&
 			(iFlags & IMPLTYPEFLAG_FSOURCE))
 		    {
-			HREFTYPE hRefType = NULL;
+			HREFTYPE hRefType = 0;
 			hr = pObj->pTypeInfo->GetRefTypeOfImplType(i, &hRefType);
 			DBG(("GetRefTypeOfImplType: hr=0x%08x\n", hr));
 			if (FAILED(hr))
@@ -4459,8 +4538,8 @@ PPCODE:
     VariantInit(&result);
     VariantInit(&propName);
 
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
     dispParams.cArgs = 0;
     dispParams.rgvarg = NULL;
@@ -4532,8 +4611,8 @@ PPCODE:
     HV *stash = SvSTASH(pObj->self);
     SetLastOleError(aTHX_ stash);
 
-    LCID lcid = QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
-    UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ stash, LCID_NAME, LCID_LEN, lcidDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
     dispParams.rgdispidNamedArgs = &dispIDParam;
     dispParams.rgvarg = propertyValue;
@@ -4568,7 +4647,7 @@ PPCODE:
 	    wFlags = DISPATCH_PROPERTYPUTREF;
 
 	hr = pObj->pDispatch->Invoke(dispID, IID_NULL, lcid, wFlags,
-				      &dispParams, NULL, &excepinfo, &argErr);
+                                     &dispParams, NULL, &excepinfo, &argErr);
 	if (FAILED(hr)) {
 	    err = sv_newmortal();
 	    sv_setpvf(err, "in PROPERTYPUT%s \"%s\"",
@@ -4605,12 +4684,13 @@ PPCODE:
     HV *stash = SvSTASH(pObj->self);
     SetLastOleError(aTHX_ stash);
 
+    SV *sv = NULL;
     switch (ix) {
     case 0: /* FIRSTKEY */
 	FetchTypeInfo(aTHX_ pObj);
 	pObj->PropIndex = 0;
     case 1: /* NEXTKEY */
-	ST(0) = NextPropertyName(aTHX_ pObj);
+	sv = NextPropertyName(aTHX_ pObj);
 	break;
 
     case 2: /* FIRSTENUM */
@@ -4618,17 +4698,20 @@ PPCODE:
 	    pObj->pEnum->Release();
 	pObj->pEnum = CreateEnumVARIANT(aTHX_ pObj);
     case 3: /* NEXTENUM */
-	ST(0) = NextEnumElement(aTHX_ pObj->pEnum, stash);
-	if (!SvOK(ST(0))) {
+	sv = NextEnumElement(aTHX_ pObj->pEnum, stash);
+	if (!sv) {
 	    pObj->pEnum->Release();
 	    pObj->pEnum = NULL;
 	}
 	break;
     }
 
-    if (!SvIMMORTAL(ST(0)))
-	sv_2mortal(ST(0));
+    if (!sv)
+        sv = &PL_sv_undef;
+    else if (!SvIMMORTAL(sv))
+	sv_2mortal(sv);
 
+    ST(0) = sv;
     XSRETURN(1);
 }
 
@@ -4652,8 +4735,8 @@ PPCODE:
     OLECHAR Buffer[OLE_BUF_SIZ];
     OLECHAR *pBuffer;
     HRESULT hr;
-    LCID lcid = SvIOK(locale) ? SvIV(locale) : lcidDefault;
-    UINT cp = SvIOK(codepage) ? SvIV(codepage) : cpDefault;
+    LCID lcid = SvIOK(locale) ? (LCID)SvIV(locale) : lcidDefault;
+    UINT cp = SvIOK(codepage) ? (UINT)SvIV(codepage) : cpDefault;
     HV *stash = gv_stashpv(szWINOLE, TRUE);
 
     Initialize(aTHX_ stash);
@@ -4730,45 +4813,49 @@ PPCODE:
 	    continue;
 	}
 
-	for (int iVar=0; iVar < pTypeAttr->cVars; ++iVar) {
-	    VARDESC *pVarDesc;
+        if (!(pTypeAttr->wTypeFlags & (TYPEFLAG_FHIDDEN |
+                                       TYPEFLAG_FRESTRICTED)))
+        {
+            for (int iVar=0; iVar < pTypeAttr->cVars; ++iVar) {
+                VARDESC *pVarDesc;
 
-	    hr = pTypeInfo->GetVarDesc(iVar, &pVarDesc);
-	    /* XXX LEAK alert */
-	    if (CheckOleError(aTHX_ stash, hr))
-	        continue;
+                hr = pTypeInfo->GetVarDesc(iVar, &pVarDesc);
+                /* XXX LEAK alert */
+                if (CheckOleError(aTHX_ stash, hr))
+                    continue;
 
-	    if (pVarDesc->varkind == VAR_CONST &&
-		!(pVarDesc->wVarFlags & (VARFLAG_FHIDDEN |
-					 VARFLAG_FRESTRICTED |
-					 VARFLAG_FNONBROWSABLE)))
-	    {
-		unsigned int cName;
-		BSTR bstr;
-		char szName[64];
+                if (pVarDesc->varkind == VAR_CONST &&
+                    !(pVarDesc->wVarFlags & (VARFLAG_FHIDDEN |
+                                             VARFLAG_FRESTRICTED |
+                                             VARFLAG_FNONBROWSABLE)))
+                {
+                    unsigned int cName;
+                    BSTR bstr;
+                    char szName[64];
 
-		hr = pTypeInfo->GetNames(pVarDesc->memid, &bstr, 1, &cName);
-		if (CheckOleError(aTHX_ stash, hr) || cName == 0 || !bstr)
-		    continue;
+                    hr = pTypeInfo->GetNames(pVarDesc->memid, &bstr, 1, &cName);
+                    if (CheckOleError(aTHX_ stash, hr) || cName == 0 || !bstr)
+                        continue;
 
-		char *pszName = GetMultiByte(aTHX_ bstr,
-					     szName, sizeof(szName), cp);
-		SV *sv = newSV(0);
-		/* XXX LEAK alert */
-		hr = SetSVFromVariantEx(aTHX_ pVarDesc->lpvarValue, sv, stash);
-		if (!CheckOleError(aTHX_ stash, hr)) {
-		    if (SvOK(caller)) {
-			/* XXX check for valid symbol name */
-			newCONSTSUB(hv, pszName, sv);
-		    }
-		    else
-		        hv_store(hv, pszName, strlen(pszName), sv, 0);
-		}
-		SysFreeString(bstr);
-		ReleaseBuffer(aTHX_ pszName, szName);
-	    }
-	    pTypeInfo->ReleaseVarDesc(pVarDesc);
-	}
+                    char *pszName = GetMultiByte(aTHX_ bstr, szName, sizeof(szName), cp);
+                    SV *sv = newSV(0);
+                    /* XXX LEAK alert */
+                    hr = SetSVFromVariantEx(aTHX_ pVarDesc->lpvarValue,
+                                            sv, stash);
+                    if (!CheckOleError(aTHX_ stash, hr)) {
+                        if (SvOK(caller)) {
+                            /* XXX check for valid symbol name */
+                            newCONSTSUB(hv, pszName, sv);
+                        }
+                        else
+                            hv_store(hv, pszName, (I32)strlen(pszName), sv, 0);
+                    }
+                    SysFreeString(bstr);
+                    ReleaseBuffer(aTHX_ pszName, szName);
+                }
+                pTypeInfo->ReleaseVarDesc(pVarDesc);
+            }
+        }
 
 	pTypeInfo->ReleaseTypeAttr(pTypeAttr);
 	pTypeInfo->Release();
@@ -4777,24 +4864,17 @@ PPCODE:
 }
 
 void
-_Typelibs(self)
+_Typelibs(self,typelib)
     SV *self
+    SV *typelib
 PPCODE:
 {
     HKEY hKeyTypelib;
     FILETIME ft;
-    LONG err;
-
-    if (USING_WIDE()) {
-	err = RegOpenKeyExW(HKEY_CLASSES_ROOT, L"Typelib", 0, KEY_READ, &hKeyTypelib);
-    }
-    else {
-	err = RegOpenKeyExA(HKEY_CLASSES_ROOT, "Typelib", 0, KEY_READ, &hKeyTypelib);
-    }
-    if (err != ERROR_SUCCESS) {
-	warn("Cannot access HKEY_CLASSES_ROOT\\Typelib");
-	XSRETURN_EMPTY;
-    }
+    LONG err = RegOpenKeyExA(HKEY_CLASSES_ROOT, SvPV_nolen(typelib),
+                             0, KEY_READ, &hKeyTypelib);
+    if (err != ERROR_SUCCESS)
+	XSRETURN_NO;
 
     EXTEND(SP, 5);
 
@@ -4802,103 +4882,45 @@ PPCODE:
     for (DWORD dwClsid=0;; ++dwClsid) {
 	HKEY hKeyClsid;
 	char szClsid[200];
-	WCHAR wClsid[100];
-	DWORD cbClsid;
-	if (USING_WIDE()) {
-	    cbClsid = (sizeof(wClsid)/sizeof(wClsid[0]));
-	    err = RegEnumKeyExW(hKeyTypelib, dwClsid, wClsid, &cbClsid,
-			       NULL, NULL, NULL, &ft);
-	    if (err != ERROR_SUCCESS)
-		break;
+        DWORD cbClsid = sizeof(szClsid);
+        err = RegEnumKeyExA(hKeyTypelib, dwClsid, szClsid, &cbClsid,
+                            NULL, NULL, NULL, &ft);
+        if (err != ERROR_SUCCESS)
+            break;
 
-	    err = RegOpenKeyExW(hKeyTypelib, wClsid, 0, KEY_READ, &hKeyClsid);
-	    if (err != ERROR_SUCCESS)
-    		continue;
-
-	    W2AHELPER(wClsid, szClsid, sizeof(szClsid));
-	    cbClsid = strlen(szClsid);
-	}
-	else {
-	    cbClsid = (sizeof(szClsid)/sizeof(szClsid[0]));
-	    err = RegEnumKeyExA(hKeyTypelib, dwClsid, szClsid, &cbClsid,
-			       NULL, NULL, NULL, &ft);
-	    if (err != ERROR_SUCCESS)
-		break;
-
-	    err = RegOpenKeyExA(hKeyTypelib, szClsid, 0, KEY_READ, &hKeyClsid);
-	    if (err != ERROR_SUCCESS)
-		continue;
-	}
+        err = RegOpenKeyExA(hKeyTypelib, szClsid, 0, KEY_READ, &hKeyClsid);
+        if (err != ERROR_SUCCESS)
+            continue;
 
 	// Enumerate versions for current clsid
 	for (DWORD dwVersion=0;; ++dwVersion) {
 	    HKEY hKeyVersion;
 	    char szVersion[20];
+            DWORD cbVersion = sizeof(szVersion);
+
+            err = RegEnumKeyExA(hKeyClsid, dwVersion, szVersion, &cbVersion,
+                                NULL, NULL, NULL, &ft);
+            if (err != ERROR_SUCCESS)
+                break;
+
+            err = RegOpenKeyExA(hKeyClsid, szVersion, 0, KEY_READ, &hKeyVersion);
+            if (err != ERROR_SUCCESS)
+                continue;
+
 	    char szTitle[600];
-	    WCHAR wVersion[10];
-	    WCHAR wTitle[300];
-	    DWORD cbVersion;
-	    LONG cbTitle;
-	    if (USING_WIDE()) {
-		cbVersion = (sizeof(wVersion)/sizeof(wVersion[0]));
-		err = RegEnumKeyExW(hKeyClsid, dwVersion, wVersion, &cbVersion,
-				   NULL, NULL, NULL, &ft);
-		if (err != ERROR_SUCCESS)
-		    break;
-
-		err = RegOpenKeyExW(hKeyClsid, wVersion, 0, KEY_READ, &hKeyVersion);
-		if (err != ERROR_SUCCESS)
-		    continue;
-
-		cbTitle = (sizeof(wTitle)/sizeof(wTitle[0]));
-		err = RegQueryValueW(hKeyVersion, NULL, wTitle, &cbTitle);
-		if (err != ERROR_SUCCESS || cbTitle <= 1)
-		    continue;
-
-		W2AHELPER(wVersion, szVersion, sizeof(szVersion));
-		cbVersion = strlen(szVersion);
-		W2AHELPER(wTitle, szTitle, sizeof(szTitle));
-		cbTitle = strlen(szTitle);
-	    }
-	    else {
-		cbVersion = (sizeof(szVersion)/sizeof(szVersion[0]));
-		err = RegEnumKeyExA(hKeyClsid, dwVersion, szVersion, &cbVersion,
-				   NULL, NULL, NULL, &ft);
-		if (err != ERROR_SUCCESS)
-		    break;
-
-		err = RegOpenKeyExA(hKeyClsid, szVersion, 0, KEY_READ, &hKeyVersion);
-		if (err != ERROR_SUCCESS)
-		    continue;
-
-		cbTitle = (sizeof(szTitle)/sizeof(szTitle[0]));
-		err = RegQueryValueA(hKeyVersion, NULL, szTitle, &cbTitle);
-		if (err != ERROR_SUCCESS || cbTitle <= 1)
-		    continue;
-	    }
+            LONG cbTitle = sizeof(szTitle);
+            err = RegQueryValueA(hKeyVersion, NULL, szTitle, &cbTitle);
+            if (err != ERROR_SUCCESS || cbTitle <= 1)
+                continue;
 
 	    // Enumerate languages
 	    for (DWORD dwLangid=0;; ++dwLangid) {
 		char szLangid[20];
-		WCHAR wLangid[10];
-		DWORD cbLangid;
-		if (USING_WIDE()) {
-		    cbLangid = (sizeof(wLangid)/sizeof(wLangid[0]));
-		    err = RegEnumKeyExW(hKeyVersion, dwLangid, wLangid, &cbLangid,
-				       NULL, NULL, NULL, &ft);
-		    if (err != ERROR_SUCCESS)
-			break;
-
-		    W2AHELPER(wLangid, szLangid, sizeof(szLangid));
-		    cbLangid = strlen(szLangid);
-		}
-		else {
-		    cbLangid = (sizeof(szLangid)/sizeof(szLangid[0]));
-		    err = RegEnumKeyExA(hKeyVersion, dwLangid, szLangid, &cbLangid,
-				       NULL, NULL, NULL, &ft);
-		    if (err != ERROR_SUCCESS)
-			break;
-		}
+		DWORD cbLangid = sizeof(szLangid);
+                err = RegEnumKeyExA(hKeyVersion, dwLangid, szLangid, &cbLangid,
+                                    NULL, NULL, NULL, &ft);
+                if (err != ERROR_SUCCESS)
+                    break;
 
 		// Language ids must be strictly numeric
 		char *psz=szLangid;
@@ -4908,34 +4930,15 @@ PPCODE:
 		    continue;
 
 		HKEY hKeyLangid;
-		if (USING_WIDE()) {
-		    // wLangid is still valid
-		    err = RegOpenKeyExW(hKeyVersion, wLangid, 0, KEY_READ,
-				       &hKeyLangid);
-		    if (err != ERROR_SUCCESS)
-			continue;
-		}
-		else {
-		    err = RegOpenKeyExA(hKeyVersion, szLangid, 0, KEY_READ,
-				       &hKeyLangid);
-		    if (err != ERROR_SUCCESS)
-			continue;
-		}
+                err = RegOpenKeyExA(hKeyVersion, szLangid, 0, KEY_READ,
+                                    &hKeyLangid);
+                if (err != ERROR_SUCCESS)
+                    continue;
 
 		// Retrieve filename of type library
 		char szFile[MAX_PATH+1];
-		WCHAR wFile[MAX_PATH+1];
 		LONG cbFile = sizeof(szFile);
-		if (USING_WIDE()) {
-		    cbFile = (sizeof(wFile)/sizeof(wFile[0]));
-		    err = RegQueryValueW(hKeyLangid, L"win32", wFile, &cbFile);
-		    W2AHELPER(wFile, szFile, sizeof(szFile));
-		    cbFile = strlen(szFile)+1;
-		}
-		else {
-		    cbFile = (sizeof(szFile)/sizeof(szFile[0]));
-		    err = RegQueryValueA(hKeyLangid, "win32", szFile, &cbFile);
-		}
+                err = RegQueryValueA(hKeyLangid, "win32", szFile, &cbFile);
 		if (err == ERROR_SUCCESS && cbFile > 1) {
                     ENTER;
                     SAVETMPS;
@@ -4959,7 +4962,7 @@ PPCODE:
 	RegCloseKey(hKeyClsid);
     }
     RegCloseKey(hKeyTypelib);
-    XSRETURN_EMPTY;
+    XSRETURN_YES;
 }
 
 void
@@ -5030,7 +5033,7 @@ PPCODE:
 
     AddToObjectChain(aTHX_ (OBJECTHEADER*)pEnumObj, WINOLEENUM_MAGIC);
 
-    SV *sv = newSViv((IV)pEnumObj);
+    SV *sv = newSViv(PTR2IV(pEnumObj));
     ST(0) = sv_2mortal(sv_bless(newRV_noinc(sv), GetStash(aTHX_ self)));
     XSRETURN(1);
 }
@@ -5076,7 +5079,7 @@ PPCODE:
     }
     else { /* Next */
 	if (items > 1)
-	    count = SvIV(ST(1));
+	    count = (int)SvIV(ST(1));
 	if (count < 1) {
 	    warn(MY_VERSION ": Win32::OLE::Enum::Next: invalid Count %ld",
 		 count);
@@ -5092,19 +5095,14 @@ PPCODE:
     HV *olestash = GetWin32OleStash(aTHX_ self);
     SetLastOleError(aTHX_ olestash);
 
-    SV *sv = NULL;
     while (ix == 0 || count-- > 0) {
-	sv = NextEnumElement(aTHX_ pEnumObj->pEnum, olestash);
-	if (!SvOK(sv))
+	SV *sv = NextEnumElement(aTHX_ pEnumObj->pEnum, olestash);
+	if (!sv)
 	    break;
 	if (!SvIMMORTAL(sv))
 	    sv_2mortal(sv);
-	if (GIMME_V == G_ARRAY)
-	    XPUSHs(sv);
+        XPUSHs(sv);
     }
-
-    if (GIMME_V == G_SCALAR && sv && SvOK(sv))
-	XPUSHs(sv);
 }
 
 void
@@ -5136,7 +5134,7 @@ PPCODE:
 
     HV *olestash = GetWin32OleStash(aTHX_ self);
     SetLastOleError(aTHX_ olestash);
-    int count = (items > 1) ? SvIV(ST(1)) : 1;
+    int count = (items > 1) ? (int)SvIV(ST(1)) : 1;
     HRESULT hr = pEnumObj->pEnum->Skip(count);
     CheckOleError(aTHX_ olestash, hr);
     ST(0) = boolSV(hr == S_OK);
@@ -5205,15 +5203,15 @@ PPCODE:
 		AV *av = (AV*)SvRV(sv);
 		SV **elt = av_fetch(av, 0, FALSE);
 		if (elt)
-		    rgsabound[iDim].lLbound = SvIV(*elt);
+		    rgsabound[iDim].lLbound = (LONG)SvIV(*elt);
 		rgsabound[iDim].cElements = 1;
 		elt = av_fetch(av, 1, FALSE);
 		if (elt)
 		    rgsabound[iDim].cElements +=
-			SvIV(*elt) - rgsabound[iDim].lLbound;
+			(ULONG)(SvIV(*elt) - rgsabound[iDim].lLbound);
 	    }
 	    else
-		rgsabound[iDim].cElements = SvIV(sv);
+		rgsabound[iDim].cElements = (ULONG)SvIV(sv);
 	}
 
 	SAFEARRAY *psa = SafeArrayCreate(vt_base, cDims, rgsabound);
@@ -5236,7 +5234,7 @@ PPCODE:
 	unsigned char* pDest;
 	STRLEN len;
 	char *ptr = SvPV(data, len);
-	V_ARRAY(pVariant) = SafeArrayCreateVector(VT_UI1, 0, len);
+	V_ARRAY(pVariant) = SafeArrayCreateVector(VT_UI1, 0, (ULONG)len);
 	if (V_ARRAY(pVariant)) {
 	    V_VT(pVariant) = VT_UI1 | VT_ARRAY;
 	    hr = SafeArrayAccessData(V_ARRAY(pVariant), (void**)&pDest);
@@ -5251,9 +5249,9 @@ PPCODE:
 	}
     }
     else {
-	UINT cp = QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
-	LCID lcid = QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN,
-				lcidDefault);
+	UINT cp = (UINT)QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
+	LCID lcid = (LCID)QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN,
+                                      lcidDefault);
 	hr = AssignVariantFromSV(aTHX_ data, pVariant, cp, lcid);
 	if (FAILED(hr)) {
 	    Safefree(pVarObj);
@@ -5265,7 +5263,7 @@ PPCODE:
     AddToObjectChain(aTHX_ (OBJECTHEADER*)pVarObj, WINOLEVARIANT_MAGIC);
 
     HV *stash = GetStash(aTHX_ self);
-    SV *sv = newSViv((IV)pVarObj);
+    SV *sv = newSViv(PTR2IV(pVarObj));
     ST(0) = sv_2mortal(sv_bless(newRV_noinc(sv), stash));
     XSRETURN(1);
 }
@@ -5278,8 +5276,7 @@ PPCODE:
     WINOLEVARIANTOBJECT *pVarObj = GetOleVariantObject(aTHX_ self);
     if (pVarObj) {
 	RemoveFromObjectChain(aTHX_ (OBJECTHEADER*)pVarObj);
-	VariantClear(&pVarObj->byref);
-	VariantClear(&pVarObj->variant);
+        ClearVariantObject(pVarObj);
 	Safefree(pVarObj);
     }
 
@@ -5299,7 +5296,7 @@ PPCODE:
     HRESULT hr;
     VARIANT variant;
     HV *olestash = GetWin32OleStash(aTHX_ self);
-    LCID lcid = QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
 
     SV *sv = &PL_sv_undef;
     SetLastOleError(aTHX_ olestash);
@@ -5334,7 +5331,7 @@ PPCODE:
 
     HRESULT hr = E_INVALIDARG;
     HV *olestash = GetWin32OleStash(aTHX_ self);
-    LCID lcid = QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
+    LCID lcid = (LCID)QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
 
     SetLastOleError(aTHX_ olestash);
     /* XXX: Does it work with VT_BYREF? */
@@ -5392,7 +5389,7 @@ PPCODE:
 	long *rgIndices;
 	New(0, rgIndices, cDims, long);
 	for (int iDim=0; iDim < cDims; ++iDim)
-            rgIndices[iDim] = SvIV(ST(1+iDim));
+            rgIndices[iDim] = (long)SvIV(ST(1+iDim));
 
 	VARTYPE vt_base = V_VT(pSource) & VT_TYPEMASK;
 	V_VT(&variant) = vt_base | VT_BYREF;
@@ -5429,7 +5426,7 @@ PPCODE:
     AddToObjectChain(aTHX_ (OBJECTHEADER*)pNewVar, WINOLEVARIANT_MAGIC);
 
     HV *stash = GetStash(aTHX_ self);
-    SV *sv = newSViv((IV)pNewVar);
+    SV *sv = newSViv(PTR2IV(pNewVar));
     ST(0) = sv_2mortal(sv_bless(newRV_noinc(sv), stash));
     XSRETURN(1);
 }
@@ -5461,14 +5458,14 @@ PPCODE:
 
     if (items > 1) {
 	if (SvIOK(ST(1)))
-	    dwFlags = SvIV(ST(1));
+	    dwFlags = (DWORD)SvIV(ST(1));
 	else if SvPOK(ST(1))
 	    fmt = SvPV_nolen(ST(1));
     }
     if (items > 2)
-	lcid = SvIV(ST(2));
+	lcid = (LCID)SvIV(ST(2));
     else
-	lcid = QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
+	lcid = (LCID)QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
 
     HRESULT hr;
     VARIANT variant;
@@ -5480,59 +5477,25 @@ PPCODE:
     SYSTEMTIME systime;
     VariantTimeToSystemTime(V_DATE(&variant), &systime);
 
-    WCHAR* wFmt = NULL;
     int len;
-    if (USING_WIDE()) {
-	if (fmt) {
-	    len = strlen(fmt)+1;
-	    New(0, wFmt, len, WCHAR);
-	    A2WHELPER(fmt, wFmt, len*sizeof(WCHAR));
-	}
-
-	if (ix == 0)
-	    len = GetDateFormatW(lcid, dwFlags, &systime, wFmt, NULL, 0);
-	else
-	    len = GetTimeFormatW(lcid, dwFlags, &systime, wFmt, NULL, 0);
-    }
-    else {
-	if (ix == 0)
-	    len = GetDateFormatA(lcid, dwFlags, &systime, fmt, NULL, 0);
-	else
-	    len = GetTimeFormatA(lcid, dwFlags, &systime, fmt, NULL, 0);
-    }
+    if (ix == 0)
+        len = GetDateFormatA(lcid, dwFlags, &systime, fmt, NULL, 0);
+    else
+        len = GetTimeFormatA(lcid, dwFlags, &systime, fmt, NULL, 0);
     if (len > 1) {
-	if (USING_WIDE()) {
-	    WCHAR* wInfo;
-	    char* pInfo;
-	    New(0, wInfo, len+1, WCHAR);
-	    if (ix == 0)
-		len = GetDateFormatW(lcid, dwFlags, &systime, wFmt, wInfo, len);
-	    else
-		len = GetTimeFormatW(lcid, dwFlags, &systime, wFmt, wInfo, len);
-	    New(0, pInfo, (len+1)*2, char);
-	    W2AHELPER(wInfo, pInfo, (len+1)*2);
-	    ST(0) = sv_2mortal(newSVpv(pInfo, 0));
-	    Safefree(pInfo);
-	    Safefree(wInfo);
-	}
-	else {
-	    SV *sv = ST(0) = sv_2mortal(newSV(len));
-	    if (ix == 0)
-		len = GetDateFormatA(lcid, dwFlags, &systime, fmt, SvPVX(sv), len);
-	    else
-		len = GetTimeFormatA(lcid, dwFlags, &systime, fmt, SvPVX(sv), len);
+        SV *sv = ST(0) = sv_2mortal(newSV(len));
+        if (ix == 0)
+            len = GetDateFormatA(lcid, dwFlags, &systime, fmt, SvPVX(sv), len);
+        else
+            len = GetTimeFormatA(lcid, dwFlags, &systime, fmt, SvPVX(sv), len);
 
-	    if (len > 1) {
-		SvCUR_set(sv, len-1);
-		SvPOK_on(sv);
-	    }
+        if (len > 1) {
+            SvCUR_set(sv, len-1);
+            SvPOK_on(sv);
 	}
     }
     else
         ST(0) = &PL_sv_undef;
-
-    if (wFmt)
-	Safefree(wFmt);
 
     VariantClear(&variant);
     XSRETURN(1);
@@ -5563,7 +5526,7 @@ PPCODE:
     if (items > 1) {
 	SV *format = ST(1);
 	if (SvIOK(format))
-	    dwFlags = SvIV(format);
+	    dwFlags = (DWORD)SvIV(format);
 	else if (SvROK(format) && SvTYPE(SvRV(format)) == SVt_PVHV)
 	    hv = (HV*)SvRV(format);
 	else {
@@ -5574,9 +5537,9 @@ PPCODE:
     }
 
     if (items > 2)
-	lcid = SvIV(ST(2));
+	lcid = (LCID)SvIV(ST(2));
     else
-	lcid = QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
+	lcid = (LCID)QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
 
     HRESULT hr;
     VARIANT variant;
@@ -5586,49 +5549,25 @@ PPCODE:
 	XSRETURN_EMPTY;
 
     CURRENCYFMTA afmt;
-    CURRENCYFMTW wfmt;
-    if (USING_WIDE()) {
-        Zero(&wfmt, 1, CURRENCYFMTW);
+    Zero(&afmt, 1, CURRENCYFMTA);
 
-	wfmt.NumDigits        = GetLocaleNumber(aTHX_ hv, "NumDigits",
-					       lcid, LOCALE_IDIGITS);
-	wfmt.LeadingZero      = GetLocaleNumber(aTHX_ hv, "LeadingZero",
-					       lcid, LOCALE_ILZERO);
-	wfmt.Grouping         = GetLocaleNumber(aTHX_ hv, "Grouping",
-					       lcid, LOCALE_SMONGROUPING);
-	wfmt.NegativeOrder    = GetLocaleNumber(aTHX_ hv, "NegativeOrder",
-					       lcid, LOCALE_INEGCURR);
-	wfmt.PositiveOrder    = GetLocaleNumber(aTHX_ hv, "PositiveOrder",
-					       lcid, LOCALE_ICURRENCY);
+    afmt.NumDigits        = (UINT)GetLocaleNumber(aTHX_ hv, "NumDigits",
+                                                  lcid, LOCALE_IDIGITS);
+    afmt.LeadingZero      = (UINT)GetLocaleNumber(aTHX_ hv, "LeadingZero",
+                                                  lcid, LOCALE_ILZERO);
+    afmt.Grouping         = (UINT)GetLocaleNumber(aTHX_ hv, "Grouping",
+                                                  lcid, LOCALE_SMONGROUPING);
+    afmt.NegativeOrder    = (UINT)GetLocaleNumber(aTHX_ hv, "NegativeOrder",
+                                                  lcid, LOCALE_INEGCURR);
+    afmt.PositiveOrder    = (UINT)GetLocaleNumber(aTHX_ hv, "PositiveOrder",
+                                                  lcid, LOCALE_ICURRENCY);
 
-	wfmt.lpDecimalSep     = GetLocaleStringW(aTHX_ hv, "DecimalSep",
-					       lcid, LOCALE_SMONDECIMALSEP);
-	wfmt.lpThousandSep    = GetLocaleStringW(aTHX_ hv, "ThousandSep",
-					       lcid, LOCALE_SMONTHOUSANDSEP);
-	wfmt.lpCurrencySymbol = GetLocaleStringW(aTHX_ hv, "CurrencySymbol",
-					       lcid, LOCALE_SCURRENCY);
-    }
-    else {
-	Zero(&afmt, 1, CURRENCYFMTA);
-
-	afmt.NumDigits        = GetLocaleNumber(aTHX_ hv, "NumDigits",
-					       lcid, LOCALE_IDIGITS);
-	afmt.LeadingZero      = GetLocaleNumber(aTHX_ hv, "LeadingZero",
-					       lcid, LOCALE_ILZERO);
-	afmt.Grouping         = GetLocaleNumber(aTHX_ hv, "Grouping",
-					       lcid, LOCALE_SMONGROUPING);
-	afmt.NegativeOrder    = GetLocaleNumber(aTHX_ hv, "NegativeOrder",
-					       lcid, LOCALE_INEGCURR);
-	afmt.PositiveOrder    = GetLocaleNumber(aTHX_ hv, "PositiveOrder",
-					       lcid, LOCALE_ICURRENCY);
-
-	afmt.lpDecimalSep     = GetLocaleString(aTHX_ hv, "DecimalSep",
-					       lcid, LOCALE_SMONDECIMALSEP);
-	afmt.lpThousandSep    = GetLocaleString(aTHX_ hv, "ThousandSep",
-					       lcid, LOCALE_SMONTHOUSANDSEP);
-	afmt.lpCurrencySymbol = GetLocaleString(aTHX_ hv, "CurrencySymbol",
-					       lcid, LOCALE_SCURRENCY);
-    }
+    afmt.lpDecimalSep     = GetLocaleString(aTHX_ hv, "DecimalSep",
+                                            lcid, LOCALE_SMONDECIMALSEP);
+    afmt.lpThousandSep    = GetLocaleString(aTHX_ hv, "ThousandSep",
+                                            lcid, LOCALE_SMONTHOUSANDSEP);
+    afmt.lpCurrencySymbol = GetLocaleString(aTHX_ hv, "CurrencySymbol",
+                                            lcid, LOCALE_SCURRENCY);
 
     int len = 0;
     int sign = 0;
@@ -5660,45 +5599,20 @@ PPCODE:
     DBG(("amount='%s' number='%s' len=%d sign=%d", amount, SvPVX(number),
 	 len, sign));
 
-    WCHAR* wNumber = NULL;
     char* pNumber = SvPVX(number);
-    if (USING_WIDE()) {
-	len = strlen(pNumber)+1;
-	New(0, wNumber, len, WCHAR);
-	A2WHELPER(pNumber, wNumber, len*sizeof(WCHAR));
-	len = GetCurrencyFormatW(lcid, dwFlags, wNumber, &wfmt, NULL, 0);
-    }
-    else {
-	len = GetCurrencyFormatA(lcid, dwFlags, pNumber, &afmt, NULL, 0);
-    }
+    len = GetCurrencyFormatA(lcid, dwFlags, pNumber, &afmt, NULL, 0);
     if (len > 1) {
-	if (USING_WIDE()) {
-	    WCHAR* wInfo;
-	    char* pInfo;
-	    New(0, wInfo, len+1, WCHAR);
-	    New(0, pInfo, (len+1)*2, char);
-	    len = GetCurrencyFormatW(lcid, dwFlags, wNumber, &wfmt,
-				     wInfo, len);
-	    W2AHELPER(wInfo, pInfo, (len+1)*2);
-	    ST(0) = sv_2mortal(newSVpv(pInfo, 0));
-	    Safefree(pInfo);
-	    Safefree(wInfo);
-	}
-	else {
-	    SV *sv = ST(0) = sv_2mortal(newSV(len));
-	    len = GetCurrencyFormatA(lcid, dwFlags, pNumber, &afmt,
-				     SvPVX(sv), len);
-	    if (len > 1) {
-		SvCUR_set(sv, len-1);
-		SvPOK_on(sv);
-	    }
-	}
+        SV *sv = ST(0) = sv_2mortal(newSV(len));
+        len = GetCurrencyFormatA(lcid, dwFlags, pNumber, &afmt,
+                                 SvPVX(sv), len);
+        if (len > 1) {
+            SvCUR_set(sv, len-1);
+            SvPOK_on(sv);
+        }
     }
     else
 	ST(0) = &PL_sv_undef;
 
-    if (wNumber)
-	Safefree(wNumber);
     SvREFCNT_dec(number);
     VariantClear(&variant);
     XSRETURN(1);
@@ -5729,7 +5643,7 @@ PPCODE:
     if (items > 1) {
 	SV *format = ST(1);
 	if (SvIOK(format))
-	    dwFlags = SvIV(format);
+	    dwFlags = (DWORD)SvIV(format);
 	else if (SvROK(format) && SvTYPE(SvRV(format)) == SVt_PVHV)
 	    hv = (HV*)SvRV(format);
 	else {
@@ -5740,9 +5654,9 @@ PPCODE:
     }
 
     if (items > 2)
-	lcid = SvIV(ST(2));
+	lcid = (LCID)SvIV(ST(2));
     else
-	lcid = QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
+	lcid = (LCID)QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN, lcidDefault);
 
     HRESULT hr;
     VARIANT variant;
@@ -5753,85 +5667,39 @@ PPCODE:
 
     UINT NumDigits;
     NUMBERFMTA afmt;
-    NUMBERFMTW wfmt;
-    if (USING_WIDE()) {
-	Zero(&wfmt, 1, NUMBERFMT);
 
-	wfmt.NumDigits     = GetLocaleNumber(aTHX_ hv, "NumDigits",
-					    lcid, LOCALE_IDIGITS);
-	wfmt.LeadingZero   = GetLocaleNumber(aTHX_ hv, "LeadingZero",
-					    lcid, LOCALE_ILZERO);
-	wfmt.Grouping      = GetLocaleNumber(aTHX_ hv, "Grouping",
-					    lcid, LOCALE_SGROUPING);
-	wfmt.NegativeOrder = GetLocaleNumber(aTHX_ hv, "NegativeOrder",
-					    lcid, LOCALE_INEGNUMBER);
+    Zero(&afmt, 1, NUMBERFMT);
 
-	wfmt.lpDecimalSep  = GetLocaleStringW(aTHX_ hv, "DecimalSep",
-					    lcid, LOCALE_SDECIMAL);
-	wfmt.lpThousandSep = GetLocaleStringW(aTHX_ hv, "ThousandSep",
-					    lcid, LOCALE_STHOUSAND);
-	NumDigits = wfmt.NumDigits;
-    }
-    else {
-	Zero(&afmt, 1, NUMBERFMT);
+    afmt.NumDigits     = (UINT)GetLocaleNumber(aTHX_ hv, "NumDigits",
+                                               lcid, LOCALE_IDIGITS);
+    afmt.LeadingZero   = (UINT)GetLocaleNumber(aTHX_ hv, "LeadingZero",
+                                               lcid, LOCALE_ILZERO);
+    afmt.Grouping      = (UINT)GetLocaleNumber(aTHX_ hv, "Grouping",
+                                               lcid, LOCALE_SGROUPING);
+    afmt.NegativeOrder = (UINT)GetLocaleNumber(aTHX_ hv, "NegativeOrder",
+                                               lcid, LOCALE_INEGNUMBER);
 
-	afmt.NumDigits     = GetLocaleNumber(aTHX_ hv, "NumDigits",
-					    lcid, LOCALE_IDIGITS);
-	afmt.LeadingZero   = GetLocaleNumber(aTHX_ hv, "LeadingZero",
-					    lcid, LOCALE_ILZERO);
-	afmt.Grouping      = GetLocaleNumber(aTHX_ hv, "Grouping",
-					    lcid, LOCALE_SGROUPING);
-	afmt.NegativeOrder = GetLocaleNumber(aTHX_ hv, "NegativeOrder",
-					    lcid, LOCALE_INEGNUMBER);
-
-	afmt.lpDecimalSep  = GetLocaleString(aTHX_ hv, "DecimalSep",
-					    lcid, LOCALE_SDECIMAL);
-	afmt.lpThousandSep = GetLocaleString(aTHX_ hv, "ThousandSep",
-					    lcid, LOCALE_STHOUSAND);
-	NumDigits = afmt.NumDigits;
-    }
+    afmt.lpDecimalSep  = GetLocaleString(aTHX_ hv, "DecimalSep",
+                                         lcid, LOCALE_SDECIMAL);
+    afmt.lpThousandSep = GetLocaleString(aTHX_ hv, "ThousandSep",
+                                         lcid, LOCALE_STHOUSAND);
+    NumDigits = afmt.NumDigits;
 
     int len;
     SV *number = newSVpvf("%.*f", NumDigits, V_R8(&variant));
     char* pNumber = SvPVX(number);
-    WCHAR* wNumber = NULL;
-    if (USING_WIDE()) {
-	len = strlen(pNumber)+1;
-	New(0, wNumber, len, WCHAR);
-	A2WHELPER(pNumber, wNumber, len*sizeof(WCHAR));
-	len = GetNumberFormatW(lcid, dwFlags, wNumber, &wfmt, NULL, 0);
-    }
-    else {
-	len = GetNumberFormatA(lcid, dwFlags, pNumber, &afmt, NULL, 0);
-    }
+    len = GetNumberFormatA(lcid, dwFlags, pNumber, &afmt, NULL, 0);
     if (len > 1) {
-	if (USING_WIDE()) {
-	    WCHAR* wInfo;
-	    char* pInfo;
-	    New(0, wInfo, len+1, WCHAR);
-	    New(0, pInfo, (len+1)*2, char);
-	    len = GetNumberFormatW(lcid, dwFlags, wNumber, &wfmt,
-				     wInfo, len);
-	    W2AHELPER(wInfo, pInfo, (len+1)*2);
-	    ST(0) = sv_2mortal(newSVpv(pInfo, 0));
-	    Safefree(pInfo);
-	    Safefree(wInfo);
-	}
-	else {
-	    SV *sv = ST(0) = sv_2mortal(newSV(len));
-	    len = GetNumberFormatA(lcid, dwFlags, pNumber, &afmt,
-				   SvPVX(sv), len);
-	    if (len > 1) {
-		SvCUR_set(sv, len-1);
-		SvPOK_on(sv);
-	    }
-	}
+        SV *sv = ST(0) = sv_2mortal(newSV(len));
+        len = GetNumberFormatA(lcid, dwFlags, pNumber, &afmt,
+                               SvPVX(sv), len);
+        if (len > 1) {
+            SvCUR_set(sv, len-1);
+            SvPOK_on(sv);
+        }
     }
     else
 	ST(0) = &PL_sv_undef;
-
-    if (wNumber)
-	Safefree(wNumber);
 
     SvREFCNT_dec(number);
     VariantClear(&variant);
@@ -5918,9 +5786,9 @@ PPCODE:
 	    hr = SetSVFromVariantEx(aTHX_ pVariant, sv, olestash);
 	}
 	else { /* Put */
-	    UINT cp = QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
-	    LCID lcid = QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN,
-				    lcidDefault);
+	    UINT cp = (UINT)QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
+	    LCID lcid = (LCID)QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN,
+                                          lcidDefault);
 	    sv = self;
 	    hr = AssignVariantFromSV(aTHX_ ST(1), pVariant, cp, lcid);
 	}
@@ -5942,9 +5810,9 @@ PPCODE:
     if (ix == 1 && items == 2 && SvROK(ST(1)) &&
 	SvTYPE(SvRV(ST(1))) == SVt_PVAV)
     {
-	UINT cp = QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
-	LCID lcid = QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN,
-				lcidDefault);
+	UINT cp = (UINT)QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
+	LCID lcid = (LCID)QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN,
+                                      lcidDefault);
 	HRESULT hr = SetSafeArrayFromAV(aTHX_ (AV*)SvRV(ST(1)), vt_base, psa,
 					cDims, cp, lcid);
 	CheckOleError(aTHX_ olestash, hr);
@@ -5961,7 +5829,7 @@ PPCODE:
     long *rgIndices;
     New(0, rgIndices, cDims, long);
     for (int iDim=0; iDim < cDims; ++iDim)
-        rgIndices[iDim] = SvIV(ST(1+iDim));
+        rgIndices[iDim] = (long)SvIV(ST(1+iDim));
 
     VARIANT variant, byref;
     VariantInit(&variant);
@@ -5990,9 +5858,9 @@ PPCODE:
 	}
     }
     else { /* Put */
-	UINT cp = QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
-	LCID lcid = QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN,
-				lcidDefault);
+	UINT cp = (UINT)QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
+	LCID lcid = (LCID)QueryPkgVar(aTHX_ olestash, LCID_NAME, LCID_LEN,
+                                      lcidDefault);
 	hr = AssignVariantFromSV(aTHX_ ST(items-1), &variant, cp, lcid);
 	if (SUCCEEDED(hr)) {
 	    if (vt_base == VT_BSTR)
@@ -6103,8 +5971,8 @@ PPCODE:
 	SetLastOleError(aTHX_ olestash);
 	VariantInit(&Variant);
 	if ((V_VT(pVariant) & ~VT_BYREF) != VT_BSTR) {
-	    LCID lcid = QueryPkgVar(aTHX_ olestash,
-				    LCID_NAME, LCID_LEN, lcidDefault);
+	    LCID lcid = (LCID)QueryPkgVar(aTHX_ olestash,
+                                          LCID_NAME, LCID_LEN, lcidDefault);
 
 	    hr = VariantChangeTypeEx(&Variant, pVariant, lcid, 0, VT_BSTR);
 	    pVariant = &Variant;
@@ -6143,19 +6011,9 @@ PPCODE:
     STRLEN length2;
     char *string1 = SvPV(str1, length1);
     char *string2 = SvPV(str2, length2);
-    int res;
 
-    if (USING_WIDE()) {
-	WCHAR *wstring1, *wstring2;
-	New(0, wstring1, length1+1, WCHAR);
-	New(0, wstring2, length2+1, WCHAR);
-	A2WHELPER(string1, wstring1, (length1+1)*sizeof(WCHAR));
-	A2WHELPER(string2, wstring2, (length2+1)*sizeof(WCHAR));
-	res = CompareStringW(lcid, flags, wstring1, -1, wstring2, -1);
-    }
-    else {
-	res = CompareStringA(lcid, flags, string1, length1, string2, length2);
-    }
+    IV res = CompareStringA((LCID)lcid, (DWORD)flags,
+                            string1, (int)length1, string2, (int)length2);
     XSRETURN_IV(res);
 }
 
@@ -6167,46 +6025,20 @@ LCMapString(lcid,flags,str)
 PPCODE:
 {
     SV *sv;
-    int len;
     STRLEN length;
-    WCHAR* wstring = NULL;
-    char *string = SvPV(str,length);
-    if (USING_WIDE()) {
-	len = strlen(string)+1;
-	New(0, wstring, len, WCHAR);
-	A2WHELPER(string, wstring, len*sizeof(WCHAR));
-	len = LCMapStringW(lcid, flags, wstring, -1, NULL, 0);
-    }
-    else {
-	len = LCMapStringA(lcid, flags, string, length, NULL, 0);
-    }
+    char *string = SvPV(str, length);
+    int len = LCMapStringA((LCID)lcid, (DWORD)flags, string, (int)length, NULL, 0);
     if (len > 0) {
-	if (USING_WIDE()) {
-	    WCHAR* wInfo;
-	    char* pInfo;
-	    New(0, wInfo, len+1, WCHAR);
-	    New(0, pInfo, (len+1)*2, char);
-	    len = LCMapStringW(lcid, flags, wstring, -1, wInfo, len);
-	    W2AHELPER(wInfo, pInfo, (len+1)*2);
-	    sv = sv_2mortal(newSVpv(pInfo, 0));
-	    Safefree(pInfo);
-	    Safefree(wInfo);
-	}
-	else {
-	    sv = sv_newmortal();
-	    SvUPGRADE(sv, SVt_PV);
-	    SvGROW(sv, (STRLEN)(len+1));
-	    SvCUR_set(sv, LCMapStringA(lcid, flags, string, length,
-				       SvPVX(sv), SvLEN(sv)));
-	    if (SvCUR(sv))
-		SvPOK_on(sv);
-	}
+        sv = sv_newmortal();
+        SvUPGRADE(sv, SVt_PV);
+        SvGROW(sv, (STRLEN)(len+1));
+        SvCUR_set(sv, LCMapStringA((LCID)lcid, (DWORD)flags, string, (int)length,
+                                   SvPVX(sv), (int)SvLEN(sv)));
+        if (SvCUR(sv))
+            SvPOK_on(sv);
     }
     else
 	sv = sv_newmortal();
-
-    if (wstring)
-	Safefree(wstring);
 
     ST(0) = sv;
     XSRETURN(1);
@@ -6218,31 +6050,16 @@ GetLocaleInfo(lcid,lctype)
     IV lctype
 PPCODE:
 {
-    SV *sv;
-    if (USING_WIDE()) {
-	WCHAR *info;
-	char *szInfo;
-	int len = GetLocaleInfoW(lcid, lctype, NULL, 0);
-	New(0, info, len, WCHAR);
-	GetLocaleInfoW(lcid, lctype, info, len);
-	New(0, szInfo, len*2, char);
-	W2AHELPER(info, szInfo, len*2);
-	sv = sv_2mortal(newSVpv(szInfo, 0));
-	Safefree(info);
-	Safefree(szInfo);
-    }
-    else {
-	sv = sv_newmortal();
-	int len = GetLocaleInfoA(lcid, lctype, NULL, 0);
-	if (len > 0) {
-	    SvUPGRADE(sv, SVt_PV);
-	    SvGROW(sv, (STRLEN)len);
-	    len = GetLocaleInfoA(lcid, lctype, SvPVX(sv), SvLEN(sv));
-	    if (len) {
-		SvCUR_set(sv, len-1);
-		SvPOK_on(sv);
-	    }
-	}
+    SV *sv = sv_newmortal();
+    int len = GetLocaleInfoA((LCID)lcid, (LCTYPE)lctype, NULL, 0);
+    if (len > 0) {
+        SvUPGRADE(sv, SVt_PV);
+        SvGROW(sv, (STRLEN)len);
+        len = GetLocaleInfoA((LCID)lcid, (LCTYPE)lctype, SvPVX(sv), (int)SvLEN(sv));
+        if (len) {
+            SvCUR_set(sv, len-1);
+            SvPOK_on(sv);
+        }
     }
     ST(0) = sv;
     XSRETURN(1);
@@ -6260,7 +6077,7 @@ PPCODE:
     unsigned short *pCharType;
 
     New(0, pCharType, len, unsigned short);
-    if (GetStringTypeA(lcid, type, string, len, pCharType)) {
+    if (GetStringTypeA((LCID)lcid, (DWORD)type, string, (int)len, pCharType)) {
 	EXTEND(SP, (IV)len);
 	for (int i=0; i < (IV)len; ++i)
 	    PUSHs(sv_2mortal(newSViv(pCharType[i])));
@@ -6318,7 +6135,7 @@ PPCODE:
 {
     DWORD_PTR dwResult;
 
-    SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, NULL,
+    SendMessageTimeout(HWND_BROADCAST, WM_SETTINGCHANGE, 0, 0,
 		       SMTO_NORMAL, 5000, &dwResult);
     XSRETURN_EMPTY;
 }
@@ -6330,18 +6147,7 @@ SetLocaleInfo(lcid,lctype,lcdata)
     char *lcdata
 PPCODE:
 {
-    BOOL result;
-    if (USING_WIDE()) {
-	WCHAR* wlcdata;
-	int len = strlen(lcdata)+1;
-	New(0, wlcdata, len, WCHAR);
-	A2WHELPER(lcdata, wlcdata, len*sizeof(WCHAR));
-	result = SetLocaleInfoW(lcid, lctype, wlcdata);
-	Safefree(wlcdata);
-    }
-    else {
-	result = SetLocaleInfoA(lcid, lctype, lcdata);
-    }
+    BOOL result = SetLocaleInfoA((LCID)lcid, (LCTYPE)lctype, lcdata);
     if (result)
 	XSRETURN_YES;
 
@@ -6388,7 +6194,7 @@ PPCODE:
     }
     else {
 	stash = GetWin32OleStash(aTHX_ self);
-	UINT cp = QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
+	UINT cp = (UINT)QueryPkgVar(aTHX_ stash, CP_NAME, CP_LEN, cpDefault);
 
 	OLECHAR Buffer[OLE_BUF_SIZ];
 	OLECHAR *pBuffer = GetWideChar(aTHX_ object, Buffer, OLE_BUF_SIZ, cp);
@@ -6438,7 +6244,7 @@ PPCODE:
 
     DWORD dwHelpContext;
     BSTR bstrName, bstrDocString, bstrHelpFile;
-    HRESULT hr = pObj->pTypeLib->GetDocumentation(index, &bstrName,
+    HRESULT hr = pObj->pTypeLib->GetDocumentation((INT)index, &bstrName,
 			  &bstrDocString, &dwHelpContext, &bstrHelpFile);
     HV *olestash = GetWin32OleStash(aTHX_ self);
     if (CheckOleError(aTHX_ olestash, hr))
@@ -6499,7 +6305,7 @@ PPCODE:
     TYPEATTR  *pTypeAttr;
 
     HV *olestash = GetWin32OleStash(aTHX_ self);
-    HRESULT hr = pObj->pTypeLib->GetTypeInfo(index, &pTypeInfo);
+    HRESULT hr = pObj->pTypeLib->GetTypeInfo((UINT)index, &pTypeInfo);
     if (CheckOleError(aTHX_ olestash, hr))
 	XSRETURN_EMPTY;
 
@@ -6530,7 +6336,7 @@ PPCODE:
     HV *olestash = GetWin32OleStash(aTHX_ self);
 
     if (SvIOK(name)) {
-	HRESULT hr = pObj->pTypeLib->GetTypeInfo(SvIV(name), &pTypeInfo);
+	HRESULT hr = pObj->pTypeLib->GetTypeInfo((UINT)SvIV(name), &pTypeInfo);
 	if (CheckOleError(aTHX_ olestash, hr))
 	    XSRETURN_EMPTY;
 
@@ -6545,7 +6351,7 @@ PPCODE:
 	XSRETURN(1);
     }
 
-    UINT cp = QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
+    UINT cp = (UINT)QueryPkgVar(aTHX_ olestash, CP_NAME, CP_LEN, cpDefault);
     TYPEKIND tkind = items > 2 ? (TYPEKIND)SvIV(ST(2)) : TKIND_MAX;
     char *pszName = SvPV_nolen(name);
     int count = pObj->pTypeLib->GetTypeInfoCount();
@@ -6681,7 +6487,7 @@ PPCODE:
     DWORD dwHelpContext;
     BSTR bstrName, bstrDocString, bstrHelpFile;
     HV *olestash = GetWin32OleStash(aTHX_ self);
-    HRESULT hr = pObj->pTypeInfo->GetDocumentation(memid, &bstrName,
+    HRESULT hr = pObj->pTypeInfo->GetDocumentation((MEMBERID)memid, &bstrName,
 			   &bstrDocString, &dwHelpContext, &bstrHelpFile);
     if (CheckOleError(aTHX_ olestash, hr))
 	XSRETURN_EMPTY;
@@ -6704,7 +6510,7 @@ PPCODE:
 
     FUNCDESC *p;
     HV *olestash = GetWin32OleStash(aTHX_ self);
-    HRESULT hr = pObj->pTypeInfo->GetFuncDesc(index, &p);
+    HRESULT hr = pObj->pTypeInfo->GetFuncDesc((UINT)index, &p);
     if (CheckOleError(aTHX_ olestash, hr))
 	XSRETURN_EMPTY;
 
@@ -6751,7 +6557,7 @@ PPCODE:
 
     int flags;
     HV *olestash = GetWin32OleStash(aTHX_ self);
-    HRESULT hr = pObj->pTypeInfo->GetImplTypeFlags(index, &flags);
+    HRESULT hr = pObj->pTypeInfo->GetImplTypeFlags((UINT)index, &flags);
     if (CheckOleError(aTHX_ olestash, hr))
 	XSRETURN_EMPTY;
 
@@ -6773,7 +6579,7 @@ PPCODE:
 	XSRETURN_EMPTY;
 
     HV *olestash = GetWin32OleStash(aTHX_ self);
-    HRESULT hr = pObj->pTypeInfo->GetRefTypeOfImplType(index, &hRefType);
+    HRESULT hr = pObj->pTypeInfo->GetRefTypeOfImplType((UINT)index, &hRefType);
     if (CheckOleError(aTHX_ olestash, hr))
 	XSRETURN_EMPTY;
 
@@ -6794,7 +6600,7 @@ PPCODE:
 
     AddToObjectChain(aTHX_ (OBJECTHEADER*)pObj, WINOLETYPEINFO_MAGIC);
 
-    SV *sv = newSViv((IV)pObj);
+    SV *sv = newSViv(PTR2IV(pObj));
     ST(0) = sv_2mortal(sv_bless(newRV_noinc(sv), GetStash(aTHX_ self)));
     XSRETURN(1);
 }
@@ -6814,7 +6620,7 @@ PPCODE:
     New(0, rgbstr, count, BSTR);
     unsigned int cNames;
     HV *olestash = GetWin32OleStash(aTHX_ self);
-    HRESULT hr = pObj->pTypeInfo->GetNames(memid, rgbstr, count, &cNames);
+    HRESULT hr = pObj->pTypeInfo->GetNames((MEMBERID)memid, rgbstr, (UINT)count, &cNames);
     if (CheckOleError(aTHX_ olestash, hr))
 	XSRETURN_EMPTY;
 
@@ -6881,7 +6687,7 @@ PPCODE:
 
     VARDESC *p;
     HV *olestash = GetWin32OleStash(aTHX_ self);
-    HRESULT hr = pObj->pTypeInfo->GetVarDesc(index, &p);
+    HRESULT hr = pObj->pTypeInfo->GetVarDesc((UINT)index, &p);
     if (CheckOleError(aTHX_ olestash, hr))
 	XSRETURN_EMPTY;
 
