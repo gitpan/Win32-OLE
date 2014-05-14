@@ -25,6 +25,10 @@
  *
  */
 
+#ifdef __GNUC__
+#   pragma GCC diagnostic ignored "-Wwrite-strings"
+#endif
+
 // #define _DEBUG
 
 #define register /* be gone */
@@ -2374,16 +2378,16 @@ SetSafeArrayFromAV(pTHX_ AV* av, VARTYPE vt, SAFEARRAY *psa,
 	cDims = SafeArrayGetDim(psa);
 
     AV **pav;
-    long *pix;
+    LONG *pix;
     long *plen;
 
     New(0, pav, cDims, AV*);
-    New(0, pix, cDims, long);
+    New(0, pix, cDims, LONG);
     New(0, plen, cDims, long);
 
     pav[0] = av;
     plen[0] = av_len(pav[0])+1;
-    Zero(pix, cDims, long);
+    Zero(pix, cDims, LONG);
 
     VARIANT variant;
     VARIANT *pElement = &variant;
@@ -2496,12 +2500,12 @@ SetVariantFromSVEx(pTHX_ SV* sv, VARIANT *pVariant, UINT cp, LCID lcid)
 	IV dim = 1;
 	IV maxdim = 2;
 	AV **pav;
-	unsigned long *pix;
+	ULONG *pix;
 	unsigned long *plen;
 	SAFEARRAYBOUND *psab;
 
 	New(0, pav, maxdim, AV*);
-	New(0, pix, maxdim, unsigned long);
+	New(0, pix, maxdim, ULONG);
 	New(0, plen, maxdim, unsigned long);
 	New(0, psab, maxdim, SAFEARRAYBOUND);
 
@@ -2519,7 +2523,7 @@ SetVariantFromSVEx(pTHX_ SV* sv, VARIANT *pVariant, UINT cp, LCID lcid)
 		if (++index >= maxdim) {
 		    maxdim *= 2;
 		    Renew(pav, maxdim, AV*);
-		    Renew(pix, maxdim, unsigned long);
+		    Renew(pix, maxdim, ULONG);
 		    Renew(plen, maxdim, unsigned long);
 		    Renew(psab, maxdim, SAFEARRAYBOUND);
 		}
@@ -2637,7 +2641,7 @@ AssignVariantFromSV(pTHX_ SV* sv, VARIANT *pVariant, UINT cp, LCID lcid)
 	char *pSrc = SvPV(sv, len);
 	HRESULT hr = SafeArrayAccessData(psa, (void**)&pDest);
 	if (SUCCEEDED(hr)) {
-	    long lLower, lUpper;
+	    LONG lLower, lUpper;
 	    SafeArrayGetLBound(psa, 1, &lLower);
 	    SafeArrayGetUBound(psa, 1, &lUpper);
 
@@ -2888,7 +2892,7 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
 	/* convert 1-dim UI1 ARRAY to simple SvPV */
 	if (vt_base == VT_UI1 && dim == 1) {
 	    char *pStr;
-	    long lLower, lUpper;
+	    LONG lLower, lUpper;
 
 	    SafeArrayGetLBound(psa, 1, &lLower);
 	    SafeArrayGetUBound(psa, 1, &lUpper);
@@ -2902,12 +2906,12 @@ SetSVFromVariantEx(pTHX_ VARIANTARG *pVariant, SV* sv, HV *stash,
 	}
 
 	AV **pav;
-	long *pArrayIndex, *pLowerBound, *pUpperBound;
+	LONG *pArrayIndex, *pLowerBound, *pUpperBound;
 
 	New(0, pav,         dim, AV*);
-	New(0, pArrayIndex, dim, long);
-	New(0, pLowerBound, dim, long);
-	New(0, pUpperBound, dim, long);
+	New(0, pArrayIndex, dim, LONG);
+	New(0, pLowerBound, dim, LONG);
+	New(0, pUpperBound, dim, LONG);
 
 	IV index;
 	for (index = 0; index < dim; ++index) {
@@ -5386,8 +5390,8 @@ PPCODE:
 	    XSRETURN_EMPTY;
 	}
 
-	long *rgIndices;
-	New(0, rgIndices, cDims, long);
+	LONG *rgIndices;
+	New(0, rgIndices, cDims, LONG);
 	for (int iDim=0; iDim < cDims; ++iDim)
             rgIndices[iDim] = (long)SvIV(ST(1+iDim));
 
@@ -5734,7 +5738,7 @@ PPCODE:
     HRESULT hr = S_OK;
     int cDims = SafeArrayGetDim(psa);
     for (int iDim=0; iDim < cDims; ++iDim) {
-	long lLBound, lUBound;
+	LONG lLBound, lUBound;
 	hr = SafeArrayGetLBound(psa, 1+iDim, &lLBound);
 	if (FAILED(hr))
 	    break;
@@ -5826,8 +5830,8 @@ PPCODE:
 	XSRETURN_EMPTY;
     }
 
-    long *rgIndices;
-    New(0, rgIndices, cDims, long);
+    LONG *rgIndices;
+    New(0, rgIndices, cDims, LONG);
     for (int iDim=0; iDim < cDims; ++iDim)
         rgIndices[iDim] = (long)SvIV(ST(1+iDim));
 
